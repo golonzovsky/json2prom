@@ -6,7 +6,6 @@ targets:
     metrics:
       - name: evo_percentage
         valueQuery: .percentageUsed
-        itemsQuery: .
         labels:
           - name: name
             query: .name
@@ -14,7 +13,6 @@ targets:
             query: .max_capacity
       - name: evo_capacity
         valueQuery: .current
-        itemsQuery: .
         labels:
           - name: name
             query: .name

@@ -19,12 +19,12 @@ import (
 )
 
 type Poller struct {
-	tgt        config.Target
-	authHeader string
-	client     *http.Client
-	metrics    []*metricBinding
-	period     time.Duration
-	logger     *slog.Logger
+	tgt       config.Target
+	authToken string
+	client    *http.Client
+	metrics   []*metricBinding
+	period    time.Duration
+	logger    *slog.Logger
 }
 
 type metricBinding struct {
@@ -41,8 +41,8 @@ func New(tgt config.Target, authHeader string, logger *slog.Logger) (*Poller, er
 	}
 
 	p := &Poller{
-		tgt:        tgt,
-		authHeader: authHeader,
+		tgt:       tgt,
+		authToken: authHeader,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -173,8 +173,8 @@ func (p *Poller) buildRequest(ctx context.Context) (*http.Request, error) {
 	for k, v := range p.tgt.Headers {
 		req.Header.Set(k, v)
 	}
-	if p.tgt.IncludeAuthHeader && p.authHeader != "" {
-		req.Header.Set("Authorization", p.authHeader)
+	if p.tgt.IncludeAuthHeader && p.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+p.authToken)
 	}
 	return req, nil
 }

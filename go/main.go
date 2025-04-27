@@ -20,7 +20,7 @@ func createRootCmd() *cobra.Command {
 	var (
 		cfgPath    string
 		listenAddr string
-		authHeader string
+		authToken  string
 		logLevel   string
 	)
 	cmd := &cobra.Command{
@@ -47,7 +47,7 @@ func createRootCmd() *cobra.Command {
 			}
 
 			for _, tgt := range cfg.Targets {
-				p, err := poller.New(tgt, authHeader, logger)
+				p, err := poller.New(tgt, authToken, logger)
 				if err != nil {
 					return err
 				}
@@ -78,7 +78,7 @@ func createRootCmd() *cobra.Command {
 
 	cmd.PersistentFlags().StringVar(&cfgPath, "config", "config.yaml", "Path to YAML configuration file")
 	cmd.PersistentFlags().StringVar(&listenAddr, "listen", ":9100", "HTTP listen address for Prometheus metrics endpoint")
-	cmd.PersistentFlags().StringVar(&authHeader, "auth-header", os.Getenv("AUTH_HEADER"), "Authorization header value (overrides $AUTH_HEADER)")
+	cmd.PersistentFlags().StringVar(&authToken, "auth-token", os.Getenv("AUTH_TOKEN"), "Authorization header value (overrides $AUTH_HEADER)")
 	cmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
 
 	return cmd
