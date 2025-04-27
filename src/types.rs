@@ -2,13 +2,13 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
     pub targets: Vec<Target>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Target {
     pub name: String,
     pub uri: String,
@@ -27,7 +27,7 @@ fn default_method() -> String {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MetricDef {
     pub name: String,
     #[serde(default = "default_items_query")]
@@ -41,7 +41,7 @@ fn default_items_query() -> String {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LabelQuery {
     pub name: String,
     pub query: String,

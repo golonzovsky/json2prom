@@ -1,11 +1,13 @@
 use crate::response::extract_metrics;
 use crate::types::Target;
+
 use prometheus::{GaugeVec, Opts, Registry};
 use reqwest::Client;
+use reqwest::header;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
-use tracing::{debug, info};
+use tracing::debug;
 
 pub struct Poller {
     target: Target,
@@ -14,6 +16,10 @@ pub struct Poller {
 
 impl Poller {
     pub fn new(target: Target, registry: Arc<Registry>) -> Self {
+        if target.include_auth_header {
+            std::env::var("AUTH_TOKEN")
+                .expect("auth token requested but env var AUTH_TOKEN not set");
+        }
         let mut gauges = Vec::new();
         for metric in &target.metrics {
             // Metric name
@@ -44,11 +50,25 @@ impl Poller {
             interval.tick().await;
             debug!("Sending request: {:?}", &self.target.uri);
 
-            if let Ok(resp) = client
-                .request(self.target.method.parse().unwrap(), &self.target.uri)
-                .send()
-                .await
-            {
+            // Build request
+            let mut req = client.request(self.target.method.parse().unwrap(), &self.target.uri);
+
+            if self.target.include_auth_header {
+                let token = std::env::var("AUTH_TOKEN").unwrap();
+                req = req.header(header::AUTHORIZATION, format!("Bearer {}", token));
+            }
+
+            if let Some(hdrs) = &self.target.headers {
+                for (k, v) in hdrs {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+            }
+
+            if let Some(params) = &self.target.form_params {
+                req = req.form(params);
+            }
+
+            if let Ok(resp) = req.send().await {
                 if let Ok(body) = resp.text().await {
                     debug!("Got resp: {:?}", &body);
 
