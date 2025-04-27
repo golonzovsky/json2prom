@@ -1,0 +1,22 @@
+targets:
+  - name: evo-enge
+    uri: https://visits.evofitness.ch/api/v1/locations/6c13f942-01dc-4141-8b0b-328291cc97ca/current
+    method: GET
+    periodSeconds: 60
+    metrics:
+      - name: evo_percentage
+        valueQuery: .percentageUsed
+        itemsQuery: .
+        labels:
+          - name: name
+            query: .name
+          - name: max_capacity
+            query: .max_capacity
+      - name: evo_capacity
+        valueQuery: .current
+        itemsQuery: .
+        labels:
+          - name: name
+            query: .name
+          - name: max_capacity
+            query: .max_capacity
