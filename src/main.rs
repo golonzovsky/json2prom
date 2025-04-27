@@ -3,6 +3,7 @@ mod poller;
 mod response;
 mod types;
 
+use std::io;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -11,6 +12,8 @@ use clap::Parser;
 use prometheus::{Encoder, Registry, TextEncoder};
 use reqwest::Client;
 use tokio::signal;
+
+use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(name = "grafana-to-go")]
@@ -31,9 +34,14 @@ async fn metrics_handler(registry: Arc<Registry>) -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_writer(io::stderr)
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
+
     let cli = Cli::parse();
     let config = config::load_config(&cli.config)?;
-    println!("Loaded config: {:#?}", config);
+    info!("Loaded config: {:#?}", config);
 
     let registry = Arc::new(Registry::new());
     let client = Client::new();
@@ -51,13 +59,14 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:9100")
         .await
         .unwrap();
-    println!(
+    info!(
         "Serving metrics on {}/metrics",
         listener.local_addr().unwrap()
     );
+
     tokio::select! {
         _ = axum::serve(listener, app) => {},
-        _ = signal::ctrl_c() => println!("Shutting down"),
+        _ = signal::ctrl_c() => info!("Shutting down"),
     }
     Ok(())
 }

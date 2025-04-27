@@ -3,9 +3,8 @@ use crate::types::Target;
 use jaq_core::{Compiler, Ctx, RcIter, load};
 use jaq_json::Val;
 use jaq_std::{ValT, defs, funs};
-use serde_json::{Value, json};
-
 use load::{Arena, File, Loader};
+use serde_json::Value;
 
 fn run_jq(input: &Value, query: &str) -> Vec<Val> {
     let loader = Loader::new(defs().chain(jaq_json::defs()));
