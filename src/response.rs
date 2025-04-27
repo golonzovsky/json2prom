@@ -1,6 +1,6 @@
 use crate::types::Target;
 
-use jaq_core::{Compiler, Ctx, Error, FilterT, RcIter, load};
+use jaq_core::{Compiler, Ctx, RcIter, load};
 use jaq_json::Val;
 use jaq_std::{ValT, defs, funs};
 use serde_json::{Value, json};
@@ -31,40 +31,32 @@ fn run_jq(input: &Value, query: &str) -> Vec<Val> {
         .collect()
 }
 
-/// Process the HTTP response body for a target, extracting metrics
-pub fn process_response(target: &Target, body: &str) {
-    match serde_json::from_str::<Value>(body) {
-        Ok(json) => {
-            for metric in &target.metrics {
-                let items = run_jq(&json, &metric.items_query);
-                for item_val in items {
-                    // convert item back to JSON for further queries
-                    let item_json: Value =
-                        serde_json::from_str(&item_val.to_string()).unwrap_or(Value::Null);
-
-                    // extract metric value
-                    for v in run_jq(&item_json, &metric.value_query) {
-                        let value = v.as_f64().unwrap_or(0.0);
-
-                        // extract labels
-                        let mut labels = Vec::new();
-                        if let Some(lbls) = &metric.labels {
-                            for lbl in lbls {
-                                let lbl_val = run_jq(&item_json, &lbl.query)
-                                    .get(0)
-                                    .map(|val| val.to_string())
-                                    .unwrap_or_default();
-                                labels.push((lbl.name.clone(), lbl_val));
-                            }
+pub fn extract_metrics(target: &Target, body: &str) -> Vec<(String, Vec<String>, f64)> {
+    let mut results = Vec::new();
+    if let Ok(json) = serde_json::from_str::<Value>(body) {
+        for metric in &target.metrics {
+            for item in run_jq(&json, &metric.items_query) {
+                let item_val: Value =
+                    serde_json::from_str(&item.to_string()).unwrap_or(Value::Null);
+                for v in run_jq(&item_val, &metric.value_query) {
+                    let value = v.as_f64().unwrap_or(0.0);
+                    let mut labels = vec![target.name.clone()];
+                    if let Some(lbls) = &metric.labels {
+                        for lbl in lbls {
+                            let s = run_jq(&item_val, &lbl.query)
+                                .first()
+                                .map(|x| match x {
+                                    Val::Str(st) => st.to_string(),
+                                    _ => x.to_string(),
+                                })
+                                .unwrap_or_default();
+                            labels.push(s);
                         }
-                        println!(
-                            "[{}] {} labels={:?} value={}",
-                            target.name, metric.name, labels, value
-                        );
                     }
+                    results.push((metric.name.clone(), labels, value));
                 }
             }
         }
-        Err(e) => eprintln!("[{}] JSON parse error: {}", target.name, e),
     }
+    results
 }

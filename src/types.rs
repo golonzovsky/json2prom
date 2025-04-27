@@ -7,7 +7,7 @@ pub struct Config {
     pub targets: Vec<Target>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Target {
     pub name: String,
@@ -26,7 +26,7 @@ fn default_method() -> String {
     "GET".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MetricDef {
     pub name: String,
@@ -40,7 +40,7 @@ fn default_items_query() -> String {
     ".".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LabelQuery {
     pub name: String,

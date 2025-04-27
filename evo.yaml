@@ -1,5 +1,5 @@
 targets:
-  - name: evo-enge-capacity
+  - name: evo-enge
     uri: https://visits.evofitness.ch/api/v1/locations/6c13f942-01dc-4141-8b0b-328291cc97ca/current
     method: GET
     periodSeconds: 60

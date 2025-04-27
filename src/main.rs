@@ -3,8 +3,12 @@ mod poller;
 mod response;
 mod types;
 
+use std::sync::Arc;
+
 use anyhow::Result;
+use axum::{Router, response::Html, routing::get};
 use clap::Parser;
+use prometheus::{Encoder, Registry, TextEncoder};
 use reqwest::Client;
 use tokio::signal;
 
@@ -17,25 +21,40 @@ struct Cli {
     config: String,
 }
 
+async fn metrics_handler(registry: Arc<Registry>) -> String {
+    let families = registry.gather();
+    let encoder = TextEncoder::new();
+    let mut buf = Vec::new();
+    encoder.encode(&families, &mut buf).unwrap();
+    String::from_utf8(buf).unwrap()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = config::load_config(&cli.config)?;
     println!("Loaded config: {:#?}", config);
 
+    let registry = Arc::new(Registry::new());
     let client = Client::new();
+    let mut app = Router::new();
 
     for target in config.targets {
-        let client = client.clone();
+        let poller = poller::Poller::new(target, registry.clone());
+        let cli = client.clone();
         tokio::spawn(async move {
-            poller::start_poller(target, client).await;
+            poller.run(cli).await;
         });
     }
+    app = app.route("/metrics", get(move || metrics_handler(registry.clone())));
 
-    println!("Press Ctrl+C to exit");
-    signal::ctrl_c().await?;
-    println!("Received Ctrl+C, shutting down");
-
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:9100")
+        .await
+        .unwrap();
+    println!("Serving metrics on {}", listener.local_addr().unwrap());
+    tokio::select! {
+        _ = axum::serve(listener, app) => {},
+        _ = signal::ctrl_c() => println!("Shutting down"),
+    }
     Ok(())
 }
-
