@@ -51,10 +51,14 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:9100")
         .await
         .unwrap();
-    println!("Serving metrics on {}", listener.local_addr().unwrap());
+    println!(
+        "Serving metrics on {}/metrics",
+        listener.local_addr().unwrap()
+    );
     tokio::select! {
         _ = axum::serve(listener, app) => {},
         _ = signal::ctrl_c() => println!("Shutting down"),
     }
     Ok(())
 }
+

@@ -41,7 +41,7 @@ impl Poller {
         let mut interval = time::interval(Duration::from_secs(self.target.period_seconds));
         loop {
             interval.tick().await;
-            println!("Sending request: {:?}", &self.target);
+            println!("Sending request: {:?}", &self.target.uri);
 
             if let Ok(resp) = client
                 .request(self.target.method.parse().unwrap(), &self.target.uri)

@@ -5,7 +5,6 @@ targets:
     periodSeconds: 60
     metrics:
       - name: evo_percentage
-        itemsQuery: .
         valueQuery: .percentageUsed
         labels:
           - name: name
@@ -13,7 +12,6 @@ targets:
           - name: max_capacity
             query: .max_capacity
       - name: evo_capacity
-        itemsQuery: .
         valueQuery: .current
         labels:
           - name: name
