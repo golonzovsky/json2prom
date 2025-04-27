@@ -118,7 +118,7 @@ func (p *Poller) Run(ctx context.Context) {
 }
 
 func (p *Poller) scrapeOnce(ctx context.Context) {
-	p.logger.Debug("requesting data from", "url", p.tgt.URI)
+	p.logger.Debug("polling target", "url", p.tgt.URI)
 	req, err := p.buildRequest(ctx)
 	if err != nil {
 		p.logger.Error("build request failed", "error", err)
