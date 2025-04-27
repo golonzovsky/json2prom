@@ -181,7 +181,7 @@ func (p *Poller) buildRequest(ctx context.Context) (*http.Request, error) {
 
 func (p *Poller) evaluate(jsonObj any) {
 	for _, mb := range p.metrics {
-		// mb.gaugeVec.Reset()
+		mb.gaugeVec.Reset()
 
 		iter := mb.itemsQuery.Run(jsonObj)
 		for {
