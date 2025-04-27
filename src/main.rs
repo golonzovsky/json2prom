@@ -7,13 +7,13 @@ use std::io;
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::{Router, response::Html, routing::get};
+use axum::{Router, routing::get};
 use clap::Parser;
 use prometheus::{Encoder, Registry, TextEncoder};
 use reqwest::Client;
 use tokio::signal;
-
 use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 #[command(name = "grafana-to-go")]
@@ -34,9 +34,10 @@ async fn metrics_handler(registry: Arc<Registry>) -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
     tracing_subscriber::fmt()
         .with_writer(io::stderr)
-        .with_max_level(tracing::Level::DEBUG)
+        .with_env_filter(filter)
         .init();
 
     let cli = Cli::parse();
