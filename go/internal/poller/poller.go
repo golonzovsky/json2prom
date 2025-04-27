@@ -35,14 +35,14 @@ type metricBinding struct {
 	gaugeVec     *prometheus.GaugeVec
 }
 
-func New(tgt config.Target, authHeader string, logger *slog.Logger) (*Poller, error) {
+func New(tgt config.Target, authToken string, logger *slog.Logger) (*Poller, error) {
 	if tgt.PeriodSeconds <= 0 {
 		return nil, errors.New("periodSeconds must be > 0")
 	}
 
 	p := &Poller{
 		tgt:       tgt,
-		authToken: authHeader,
+		authToken: authToken,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
