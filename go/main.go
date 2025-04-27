@@ -25,7 +25,7 @@ func createRootCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "grafana-to-go",
-		Short: "curl json to prometheus proxy",
+		Short: "curl->json->jq->prometheus_metric",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			level := slog.LevelInfo
 			switch logLevel {
