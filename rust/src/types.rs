@@ -14,8 +14,7 @@ pub struct Target {
     pub uri: String,
     #[serde(default = "default_method")]
     pub method: String,
-    #[serde(default)]
-    pub include_auth_header: bool,
+    pub use_bearer_token_from: Option<String>,
     pub headers: Option<HashMap<String, String>>,
     pub form_params: Option<HashMap<String, String>>,
     pub period_seconds: u64,

@@ -16,9 +16,8 @@ pub struct Poller {
 
 impl Poller {
     pub fn new(target: Target, registry: Arc<Registry>) -> Self {
-        if target.include_auth_header {
-            std::env::var("AUTH_TOKEN")
-                .expect("auth token requested but env var AUTH_TOKEN not set");
+        if let Some(token_env) = &target.use_bearer_token_from {
+            std::env::var(token_env).expect("auth token requested but env var not set");
         }
         let mut gauges = Vec::new();
         for metric in &target.metrics {
@@ -53,9 +52,9 @@ impl Poller {
             // Build request
             let mut req = client.request(self.target.method.parse().unwrap(), &self.target.uri);
 
-            if self.target.include_auth_header {
-                let token = std::env::var("AUTH_TOKEN").unwrap();
-                req = req.header(header::AUTHORIZATION, format!("Bearer {}", token));
+            if let Some(token_env) = &self.target.use_bearer_token_from {
+                let bearer_token = std::env::var(token_env).unwrap();
+                req = req.header(header::AUTHORIZATION, format!("Bearer {}", bearer_token));
             }
 
             if let Some(hdrs) = &self.target.headers {
