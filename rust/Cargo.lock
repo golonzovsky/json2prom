@@ -478,27 +478,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
 
 [[package]]
-name = "grafana-to-go"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "dashmap",
- "jaq-core",
- "jaq-json",
- "jaq-std",
- "prometheus",
- "reqwest",
- "serde",
- "serde_json",
- "serde_yaml",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "h2"
 version = "0.4.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -877,6 +856,27 @@ checksum = "1cfaf33c695fc6e08064efbc1f72ec937429614f25eef83af942d0e227c3a28f"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "json2prom"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "dashmap",
+ "jaq-core",
+ "jaq-json",
+ "jaq-std",
+ "prometheus",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
