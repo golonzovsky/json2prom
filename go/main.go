@@ -11,20 +11,16 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
-
-	"github.com/golonzovsky/grafana-to-go/internal/config"
-	"github.com/golonzovsky/grafana-to-go/internal/poller"
 )
 
 func createRootCmd() *cobra.Command {
 	var (
 		cfgPath    string
 		listenAddr string
-		authToken  string
 		logLevel   string
 	)
 	cmd := &cobra.Command{
-		Use:   "grafana-to-go",
+		Use:   "json2prom",
 		Short: "curl->json->jq->prometheus_metric",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			level := slog.LevelInfo
@@ -41,13 +37,13 @@ func createRootCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 
-			cfg, err := config.Load(cfgPath)
+			cfg, err := LoadConfig(cfgPath)
 			if err != nil {
 				return err
 			}
 
 			for _, tgt := range cfg.Targets {
-				p, err := poller.New(tgt, authToken, logger)
+				p, err := NewPoller(tgt, logger)
 				if err != nil {
 					return err
 				}
@@ -78,7 +74,6 @@ func createRootCmd() *cobra.Command {
 
 	cmd.PersistentFlags().StringVar(&cfgPath, "config", "config.yaml", "Path to YAML configuration file")
 	cmd.PersistentFlags().StringVar(&listenAddr, "listen", ":9100", "HTTP listen address for Prometheus metrics endpoint")
-	cmd.PersistentFlags().StringVar(&authToken, "auth-token", os.Getenv("AUTH_TOKEN"), "Authorization header value (overrides $AUTH_HEADER)")
 	cmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
 
 	return cmd

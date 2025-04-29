@@ -1,4 +1,4 @@
-package config
+package main
 
 import (
 	"os"
@@ -12,14 +12,14 @@ type (
 	}
 
 	Target struct {
-		Name              string            `yaml:"name"`
-		URI               string            `yaml:"uri"`
-		Method            string            `yaml:"method"`
-		IncludeAuthHeader bool              `yaml:"includeAuthHeader"`
-		Headers           map[string]string `yaml:"headers"`
-		FormParams        map[string]string `yaml:"formParams"`
-		PeriodSeconds     int               `yaml:"periodSeconds"`
-		Metrics           []MetricConfig    `yaml:"metrics"`
+		Name               string            `yaml:"name"`
+		URI                string            `yaml:"uri"`
+		Method             string            `yaml:"method"`
+		UseBearerTokenFrom string            `yaml:"useBearerTokenFrom"`
+		Headers            map[string]string `yaml:"headers"`
+		FormParams         map[string]string `yaml:"formParams"`
+		PeriodSeconds      int               `yaml:"periodSeconds"`
+		Metrics            []MetricConfig    `yaml:"metrics"`
 	}
 
 	MetricConfig struct {
@@ -35,7 +35,7 @@ type (
 	}
 )
 
-func Load(path string) (*Config, error) {
+func LoadConfig(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

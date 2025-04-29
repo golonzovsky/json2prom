@@ -1,4 +1,4 @@
-package poller
+package main
 
 import (
 	"bytes"
@@ -10,39 +10,40 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/itchyny/gojq"
 	"github.com/prometheus/client_golang/prometheus"
-
-	"github.com/golonzovsky/grafana-to-go/internal/config"
 )
 
 type Poller struct {
-	tgt       config.Target
-	authToken string
-	client    *http.Client
-	metrics   []*metricBinding
-	period    time.Duration
-	logger    *slog.Logger
+	tgt     Target
+	client  *http.Client
+	metrics []*metricBinding
+	period  time.Duration
+	logger  *slog.Logger
 }
 
 type metricBinding struct {
-	cfg          config.MetricConfig
+	cfg          MetricConfig
 	itemsQuery   *gojq.Query
 	valueQuery   *gojq.Query
 	labelQueries map[string]*gojq.Query
 	gaugeVec     *prometheus.GaugeVec
 }
 
-func New(tgt config.Target, authToken string, logger *slog.Logger) (*Poller, error) {
+func NewPoller(tgt Target, logger *slog.Logger) (*Poller, error) {
 	if tgt.PeriodSeconds <= 0 {
 		return nil, errors.New("periodSeconds must be > 0")
 	}
 
+	if tgt.UseBearerTokenFrom != "" && os.Getenv(tgt.UseBearerTokenFrom) == "" {
+		return nil, errors.New("requested bearer token env var is not set: " + tgt.UseBearerTokenFrom)
+	}
+
 	p := &Poller{
-		tgt:       tgt,
-		authToken: authToken,
+		tgt: tgt,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -61,7 +62,7 @@ func New(tgt config.Target, authToken string, logger *slog.Logger) (*Poller, err
 	return p, nil
 }
 
-func prepareMetric(mc config.MetricConfig) (*metricBinding, error) {
+func prepareMetric(mc MetricConfig) (*metricBinding, error) {
 	labelNames := make([]string, 0, len(mc.Labels))
 	labelQueries := make(map[string]*gojq.Query)
 	for _, l := range mc.Labels {
@@ -173,8 +174,8 @@ func (p *Poller) buildRequest(ctx context.Context) (*http.Request, error) {
 	for k, v := range p.tgt.Headers {
 		req.Header.Set(k, v)
 	}
-	if p.tgt.IncludeAuthHeader && p.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+p.authToken)
+	if p.tgt.UseBearerTokenFrom != "" {
+		req.Header.Set("Authorization", "Bearer "+os.Getenv(p.tgt.UseBearerTokenFrom))
 	}
 	return req, nil
 }
