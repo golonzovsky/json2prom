@@ -17,6 +17,8 @@ pub struct Target {
     pub use_bearer_token_from: Option<String>,
     pub headers: Option<HashMap<String, String>>,
     pub form_params: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub xml_mode: bool,
     pub period_seconds: u64,
     pub metrics: Vec<MetricDef>,
 }

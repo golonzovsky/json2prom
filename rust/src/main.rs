@@ -2,6 +2,8 @@ mod config;
 mod poller;
 mod response;
 mod types;
+#[cfg(test)]
+mod tests;
 
 use std::io;
 use std::sync::Arc;
