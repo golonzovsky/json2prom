@@ -6,9 +6,9 @@ mod test_utils {
 
     fn create_test_target(xml_mode: bool) -> Target {
         let config_file = if xml_mode {
-            "/Users/ax/project/rust/grafana-to-go/rust/evo-xml-example.yaml"
+            "evo-xml-example.yaml"
         } else {
-            "/Users/ax/project/rust/grafana-to-go/rust/evo.yaml"
+            "evo.yaml"
         };
         
         // Load the first target from the config file
