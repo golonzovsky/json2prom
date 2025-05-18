@@ -1,7 +1,6 @@
 mod config;
 mod poller;
 mod response;
-mod types;
 #[cfg(test)]
 mod tests;
 
@@ -59,13 +58,8 @@ async fn main() -> Result<()> {
     }
     app = app.route("/metrics", get(move || metrics_handler(registry.clone())));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:9100")
-        .await
-        .unwrap();
-    info!(
-        "Serving metrics on {}/metrics",
-        listener.local_addr().unwrap()
-    );
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:9100").await?;
+    info!("Serving metrics on {}/metrics", listener.local_addr()?);
 
     tokio::select! {
         _ = axum::serve(listener, app) => {},
@@ -73,4 +67,3 @@ async fn main() -> Result<()> {
     }
     Ok(())
 }
-

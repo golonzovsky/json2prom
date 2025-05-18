@@ -2,7 +2,7 @@
 mod test_utils {
     use crate::config::load_config;
     use crate::response::extract_metrics;
-    use crate::types::Target;
+    use crate::config::Target;
 
     fn create_test_target(xml_mode: bool) -> Target {
         let config_file = if xml_mode {

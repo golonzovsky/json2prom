@@ -1,4 +1,4 @@
-use crate::types::Target;
+use crate::config::Target;
 
 use jaq_core::{Compiler, Ctx, RcIter, load};
 use jaq_json::Val;

@@ -1,5 +1,5 @@
 use crate::response::extract_metrics;
-use crate::types::Target;
+use crate::config::Target;
 
 use prometheus::{GaugeVec, Opts, Registry};
 use reqwest::Client;

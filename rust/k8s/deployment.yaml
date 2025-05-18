@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: json2prom
+  labels:
+    app: json2prom
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: json2prom
+  template:
+    metadata:
+      labels:
+        app: json2prom
+    spec:
+      containers:
+      - name: json2prom
+        image: json2prom:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9100
+          name: metrics
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/json2prom
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: metrics
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: metrics
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      volumes:
+      - name: config-volume
+        configMap:
+          name: json2prom-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: json2prom
+  labels:
+    app: json2prom
+spec:
+  ports:
+  - port: 9100
+    targetPort: 9100
+    name: metrics
+  selector:
+    app: json2prom
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: json2prom
+  labels:
+    app: json2prom
+spec:
+  selector:
+    matchLabels:
+      app: json2prom
+  endpoints:
+  - port: metrics
+    interval: 30s
