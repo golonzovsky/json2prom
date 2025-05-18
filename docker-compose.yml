@@ -57,7 +57,7 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./docker/grafana-provisioning:/etc/grafana/provisioning
+      - ./_deploy/grafana-provisioning:/etc/grafana/provisioning
     depends_on:
       - prometheus
     networks:
