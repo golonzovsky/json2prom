@@ -232,7 +232,7 @@
           },
           "editorMode": "code",
           "expr": "evo_capacity",
-          "legendFormat": "{{name}} - current capacity",
+          "legendFormat": "{{name}}",
           "range": true,
           "refId": "A"
         }
@@ -392,7 +392,7 @@
     }
   ],
   "preload": false,
-  "refresh": "10s",
+  "refresh": "30s",
   "schemaVersion": 41,
   "tags": [
     "json2prom",
@@ -402,12 +402,12 @@
     "list": []
   },
   "time": {
-    "from": "now-1h",
+    "from": "now-6h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "",
   "title": "Json2Prom Dashboard",
   "uid": "json2prom",
-  "version": 1
+  "version": 2
 }
