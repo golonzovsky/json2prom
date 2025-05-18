@@ -17,12 +17,12 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "grafana-to-go")]
+#[command(name = "json2prom")]
 #[command(about = "prometheus proxy exporter or curl jq queries", long_about = None)]
 struct Cli {
     #[arg(short, long)]
     config: String,
-    
+
     #[arg(long, default_value = "0.0.0.0:9100")]
     listen_address: String,
 }
@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
             poller.run(cli).await;
         });
     }
-    
+
     let mut app = Router::new();
     app = app.route("/metrics", get(move || metrics_handler(registry.clone())));
 
