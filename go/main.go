@@ -73,7 +73,7 @@ func createRootCmd() *cobra.Command {
 	}
 
 	cmd.PersistentFlags().StringVar(&cfgPath, "config", "config.yaml", "Path to YAML configuration file")
-	cmd.PersistentFlags().StringVar(&listenAddr, "listen", ":9100", "HTTP listen address for Prometheus metrics endpoint")
+	cmd.PersistentFlags().StringVar(&listenAddr, "listen", "0.0.0.0:9101", "HTTP listen address for Prometheus metrics endpoint")
 	cmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
 
 	return cmd

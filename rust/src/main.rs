@@ -18,11 +18,13 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 #[command(name = "grafana-to-go")]
-#[command(about = "prometeus proxy exporter or curl jq queries", long_about = None)]
+#[command(about = "prometheus proxy exporter or curl jq queries", long_about = None)]
 struct Cli {
-    /// Path to the YAML config file
     #[arg(short, long)]
     config: String,
+    
+    #[arg(long, default_value = "0.0.0.0:9100")]
+    listen_address: String,
 }
 
 async fn metrics_handler(registry: Arc<Registry>) -> String {
@@ -47,8 +49,6 @@ async fn main() -> Result<()> {
 
     let registry = Arc::new(Registry::new());
     let client = Client::new();
-    let mut app = Router::new();
-
     for target in config.targets {
         let poller = poller::Poller::new(target, registry.clone());
         let cli = client.clone();
@@ -56,9 +56,11 @@ async fn main() -> Result<()> {
             poller.run(cli).await;
         });
     }
+    
+    let mut app = Router::new();
     app = app.route("/metrics", get(move || metrics_handler(registry.clone())));
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:9100").await?;
+    let listener = tokio::net::TcpListener::bind(&cli.listen_address).await?;
     info!("Serving metrics on {}/metrics", listener.local_addr()?);
 
     tokio::select! {

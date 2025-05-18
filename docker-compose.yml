@@ -3,14 +3,27 @@ version: "3.8"
 services:
   json2prom:
     build:
-      context: .
+      context: ./rust
       dockerfile: Dockerfile
     container_name: json2prom
     restart: unless-stopped
     ports:
       - "9100:9100"
     volumes:
-      - ./evo.yaml:/etc/json2prom/config.yaml:ro
+      - ./rust/evo.yaml:/etc/json2prom/config.yaml:ro
+    networks:
+      - monitoring
+
+  json2prom-go:
+    build:
+      context: ./go
+      dockerfile: Dockerfile
+    container_name: json2prom-go
+    restart: unless-stopped
+    ports:
+      - "9101:9101"
+    volumes:
+      - ./go/evo.yaml:/etc/json2prom/config.yaml:ro
     networks:
       - monitoring
 
@@ -21,7 +34,7 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./_deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
@@ -44,7 +57,7 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./docker/grafana/provisioning:/etc/grafana/provisioning
+      - ./docker/grafana-provisioning:/etc/grafana/provisioning
     depends_on:
       - prometheus
     networks:
@@ -57,4 +70,3 @@ networks:
 volumes:
   prometheus-data:
   grafana-data:
-
