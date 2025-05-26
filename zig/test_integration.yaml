@@ -1,0 +1,11 @@
+targets:
+  - name: integration-test
+    uri: http://example.com/api
+    method: GET
+    periodSeconds: 30
+    metrics:
+      - name: test_gauge
+        valueQuery: .value
+        labels:
+          - name: status
+            query: .status

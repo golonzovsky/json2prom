@@ -4,38 +4,27 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const exe_mod = b.createModule(.{
+    const exe = b.addExecutable(.{
+        .name = "json2prom",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const exe = b.addExecutable(.{
-        .name = "zig",
-        .root_module = exe_mod,
+    // Link with libjq
+    exe.linkSystemLibrary("jq");
+    exe.linkLibC();
+
+    // Add yaml parsing dependency
+    const yaml = b.dependency("yaml", .{
+        .target = target,
+        .optimize = optimize,
     });
-
-    // zig-yaml
-    const yaml_dep = b.dependency("zig-yaml", .{});
-    exe.addModule("yaml", yaml_dep.module("yaml"));
-
-    // zig‑clap (command‑line flags)
-    const clap_dep = b.dependency("clap", .{}); // pulled via `git submodule add https://github.com/Hejsil/zig-clap extern/zig-clap`
-    exe.addModule("clap", clap_dep.module("clap"));
-
-    // libjq (C)
-    const jq_cflags = [_][]const u8{"-DJQ_STATIC"};
-    const jqlib = b.addStaticLibrary("jq", null);
-    jqlib.addCSourceFiles(.{
-        .root = "extern/jq",
-    }, jq_cflags);
-    exe.linkLibrary(jqlib);
-    exe.addIncludePath("extern/jq");
+    exe.root_module.addImport("yaml", yaml.module("yaml"));
 
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
-
     run_cmd.step.dependOn(b.getInstallStep());
 
     if (b.args) |args| {
@@ -45,12 +34,62 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const exe_unit_tests = b.addTest(.{
-        .root_module = exe_mod,
+    // Tests
+    const test_step = b.step("test", "Run unit tests");
+
+    // Config tests
+    const config_tests = b.addTest(.{
+        .root_source_file = b.path("src/config.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    config_tests.root_module.addImport("yaml", yaml.module("yaml"));
+
+    // JQ tests
+    const jq_tests = b.addTest(.{
+        .root_source_file = b.path("src/jq.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    jq_tests.linkSystemLibrary("jq");
+    jq_tests.linkLibC();
+
+    // Metrics tests
+    const metrics_tests = b.addTest(.{
+        .root_source_file = b.path("src/metrics.zig"),
+        .target = target,
+        .optimize = optimize,
     });
 
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
+    // Poller tests
+    const poller_tests = b.addTest(.{
+        .root_source_file = b.path("src/poller.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    poller_tests.linkSystemLibrary("jq");
+    poller_tests.linkLibC();
+    poller_tests.root_module.addImport("yaml", yaml.module("yaml"));
 
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_exe_unit_tests.step);
+    // Integration tests
+    const integration_tests = b.addTest(.{
+        .root_source_file = b.path("src/test_integration.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    integration_tests.linkSystemLibrary("jq");
+    integration_tests.linkLibC();
+    integration_tests.root_module.addImport("yaml", yaml.module("yaml"));
+
+    const run_config_tests = b.addRunArtifact(config_tests);
+    const run_jq_tests = b.addRunArtifact(jq_tests);
+    const run_metrics_tests = b.addRunArtifact(metrics_tests);
+    const run_poller_tests = b.addRunArtifact(poller_tests);
+    const run_integration_tests = b.addRunArtifact(integration_tests);
+
+    test_step.dependOn(&run_config_tests.step);
+    test_step.dependOn(&run_jq_tests.step);
+    test_step.dependOn(&run_metrics_tests.step);
+    test_step.dependOn(&run_poller_tests.step);
+    test_step.dependOn(&run_integration_tests.step);
 }
