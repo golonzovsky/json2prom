@@ -1,3 +1,4 @@
 rust/target
 zig/.zig-cache
 zig/zig-out
+.idea
