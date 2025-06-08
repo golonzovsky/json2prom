@@ -90,7 +90,7 @@
               "mode": "none"
             },
             "thresholdsStyle": {
-              "mode": "area"
+              "mode": "dashed"
             }
           },
           "mappings": [],
@@ -119,6 +119,14 @@
                 "value": {
                   "mode": "shades"
                 }
+              },
+              {
+                "id": "custom.gradientMode",
+                "value": "opacity"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 60
               }
             ]
           },
@@ -131,6 +139,29 @@
               {
                 "id": "custom.lineWidth",
                 "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "EVO Zurich Enge - 2 weeks ago"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#606065",
+                  "mode": "shades"
+                }
+              },
+              {
+                "id": "custom.gradientMode",
+                "value": "opacity"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 30
               }
             ]
           }
@@ -164,10 +195,11 @@
             "uid": "PBFA97CFB590B2093"
           },
           "editorMode": "code",
-          "expr": "evo_capacity",
-          "legendFormat": "{{name}} - current capacity",
+          "expr": "avg_over_time(evo_capacity[30m] offset 14d)  ",
+          "hide": false,
+          "legendFormat": "{{name}} - 2 weeks ago",
           "range": true,
-          "refId": "A"
+          "refId": "C"
         },
         {
           "datasource": {
@@ -175,11 +207,22 @@
             "uid": "PBFA97CFB590B2093"
           },
           "editorMode": "code",
-          "expr": "evo_capacity offset 7d",
+          "expr": "avg_over_time(evo_capacity[30m] offset 7d)  ",
           "hide": false,
           "legendFormat": "{{name}} - prev week",
           "range": true,
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "editorMode": "code",
+          "expr": "evo_capacity",
+          "legendFormat": "{{name}} - current capacity",
+          "range": true,
+          "refId": "A"
         }
       ],
       "title": "Current Capacity",
@@ -276,5 +319,5 @@
   "timezone": "",
   "title": "Json2Prom Dashboard",
   "uid": "json2prom",
-  "version": 2
+  "version": 4
 }
