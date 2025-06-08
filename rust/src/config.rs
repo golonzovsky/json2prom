@@ -49,7 +49,6 @@ pub struct LabelQuery {
     pub query: String,
 }
 
-/// Load and parse the YAML config from the given path
 pub fn load_config(path: &str) -> Result<Config> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
