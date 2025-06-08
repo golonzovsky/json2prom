@@ -11,7 +11,6 @@ jaq-core = "2.2.0"
 jaq-json = { version = "1.1.2", features = ["serde_json"] }
 jaq-std = "2.1.1"
 prometheus = "0.14.0"
-quick-xml = { version = "0.37.5", features = ["serialize"] }
 reqwest = { version = "0.12.19", features = ["json", "gzip"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"

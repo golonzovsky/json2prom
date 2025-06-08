@@ -1,5 +1,5 @@
-use crate::response::extract_metrics;
 use crate::config::Target;
+use crate::response::extract_metrics;
 
 use prometheus::{GaugeVec, Opts, Registry};
 use reqwest::Client;
@@ -70,10 +70,6 @@ impl Poller {
             if let Ok(resp) = req.send().await {
                 if let Ok(body) = resp.text().await {
                     debug!("Got resp: {:?}", &body);
-                    
-                    if self.target.xml_mode {
-                        debug!("Processing response in XML mode");
-                    }
 
                     let metrics = extract_metrics(&self.target, &body);
                     for (metric_name, label_values, value) in metrics {
