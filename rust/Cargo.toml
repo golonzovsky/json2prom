@@ -6,16 +6,16 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.98"
 axum = "0.8.4"
-clap = { version = "4.5.40", features = ["derive"] }
-jaq-core = "2.2.0"
-jaq-json = { version = "1.1.2", features = ["serde_json"] }
-jaq-std = "2.1.1"
+clap = { version = "4.5.42", features = ["derive"] }
+jaq-core = "2.2.1"
+jaq-json = { version = "1.1.3", features = ["serde_json"] }
+jaq-std = "2.1.2"
 prometheus = "0.14.0"
-reqwest = { version = "0.12.20", features = ["json", "gzip"] }
+reqwest = { version = "0.12.22", features = ["json", "gzip"] }
 serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
+serde_json = "1.0.142"
 serde_yaml = "0.9.34"
-tokio = { version = "1.45.1", features = ["full", "macros", "tracing"] }
+tokio = { version = "1.47.1", features = ["full", "macros", "tracing"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = [
   "fmt",
