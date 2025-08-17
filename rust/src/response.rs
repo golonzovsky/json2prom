@@ -5,26 +5,36 @@ use jaq_json::Val;
 use jaq_std::{ValT, defs, funs};
 use load::{Arena, File, Loader};
 use serde_json::Value;
-use tracing::warn;
+use tracing::{debug, warn};
 
 fn run_jq(input: &Value, query: &str) -> Vec<Val> {
     let loader = Loader::new(defs().chain(jaq_json::defs()));
     let arena = Arena::default();
 
-    let modules = loader
-        .load(
-            &arena,
-            File {
-                code: query,
-                path: (),
-            },
-        )
-        .expect("failed to load jq program");
+    let modules = match loader.load(
+        &arena,
+        File {
+            code: query,
+            path: (),
+        },
+    ) {
+        Ok(modules) => modules,
+        Err(e) => {
+            warn!("Failed to parse jq query '{}': {:?}", query, e);
+            return Vec::new();
+        }
+    };
 
-    let filter = Compiler::default()
+    let filter = match Compiler::default()
         .with_funs(funs().chain(jaq_json::funs()))
         .compile(modules)
-        .expect("failed to compile jq filter");
+    {
+        Ok(filter) => filter,
+        Err(e) => {
+            warn!("Failed to compile jq query '{}': {:?}", query, e);
+            return Vec::new();
+        }
+    };
 
     let inputs = RcIter::new(std::iter::empty());
     let ctx = Ctx::new([], &inputs);
@@ -35,42 +45,64 @@ fn run_jq(input: &Value, query: &str) -> Vec<Val> {
         .collect()
 }
 
-fn parse_body(body: &str) -> Option<Value> {
-    serde_json::from_str::<Value>(body)
-        .map_err(|e| warn!("Failed to parse JSON: {}", e))
-        .ok()
+fn parse_json(body: &str) -> Option<Value> {
+    match serde_json::from_str::<Value>(body) {
+        Ok(json) => Some(json),
+        Err(e) => {
+            debug!("Failed to parse JSON response: {}", e);
+            None
+        }
+    }
 }
 
-fn extract_label(item_val: &Value, query: &str) -> String {
-    run_jq(item_val, query)
+fn extract_label(item: &Value, query: &str) -> String {
+    run_jq(item, query)
         .first()
-        .map(|x| match x {
-            Val::Str(st) => st.to_string(),
-            _ => x.to_string(),
+        .map(|val| match val {
+            Val::Str(s) => s.to_string(),
+            _ => val.to_string(),
         })
         .unwrap_or_default()
 }
 
 pub fn extract_metrics(target: &Target, body: &str) -> Vec<(String, Vec<String>, f64)> {
-    let mut results = Vec::new();
-
-    let Some(json) = parse_body(body) else {
-        return results;
+    let Some(json) = parse_json(body) else {
+        return Vec::new();
     };
 
-    for metric in &target.metrics {
-        for item in run_jq(&json, &metric.items_query) {
-            let item_val: Value = serde_json::from_str(&item.to_string()).unwrap_or(Value::Null);
+    let mut results = Vec::new();
 
-            for v in run_jq(&item_val, &metric.value_query) {
-                let value = v.as_f64().unwrap_or(0.0);
+    for metric in &target.metrics {
+        let items = run_jq(&json, &metric.items_query);
+        if items.is_empty() {
+            debug!(
+                "No items found for metric '{}' with query '{}'",
+                metric.name, metric.items_query
+            );
+        }
+
+        for item in items {
+            let item_json: Value = serde_json::from_str(&item.to_string()).unwrap_or(Value::Null);
+
+            let values = run_jq(&item_json, &metric.value_query);
+            if values.is_empty() {
+                debug!(
+                    "No values found for metric '{}' with query '{}'",
+                    metric.name, metric.value_query
+                );
+            }
+
+            for val in values {
+                let value = val.as_f64().unwrap_or_else(|_| {
+                    debug!("Non-numeric value for metric '{}': {:?}", metric.name, val);
+                    0.0
+                });
 
                 let mut labels = vec![target.name.clone()];
 
-                if let Some(lbls) = &metric.labels {
-                    for lbl in lbls {
-                        let label_value = extract_label(&item_val, &lbl.query);
-                        labels.push(label_value);
+                if let Some(label_queries) = &metric.labels {
+                    for label_query in label_queries {
+                        labels.push(extract_label(&item_json, &label_query.query));
                     }
                 }
 
