@@ -17,7 +17,7 @@ serde_json = "1.0.142"
 serde_yaml = "0.9.34"
 tokio = { version = "1.47.1", features = ["full", "macros", "tracing"] }
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = [
+tracing-subscriber = { version = "0.3.20", features = [
   "fmt",
   "ansi",
   "env-filter",
