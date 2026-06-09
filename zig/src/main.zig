@@ -13,42 +13,43 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
-    var config_path: ?[]const u8 = null;
+    var config_path: []const u8 = "config.yaml";
     var listen_addr: []const u8 = default_listen;
 
     var args = init.minimal.args.iterate();
     const argv0 = args.next() orelse "json2prom";
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--config")) {
-            config_path = args.next() orelse return usage(argv0);
+            config_path = args.next() orelse usage(argv0);
         } else if (std.mem.eql(u8, arg, "--listen")) {
-            listen_addr = args.next() orelse return usage(argv0);
+            listen_addr = args.next() orelse usage(argv0);
         } else {
-            return usage(argv0);
+            usage(argv0);
         }
     }
-    const path = config_path orelse return usage(argv0);
-
-    var cfg = try config.load(gpa, io, path);
+    var cfg = config.load(gpa, io, config_path) catch std.process.exit(1);
     defer cfg.deinit();
-    try config.resolveBearerTokens(cfg.targets, init.environ_map);
+    config.resolveBearerTokens(cfg.targets, init.environ_map) catch std.process.exit(1);
 
     var registry = metrics.Registry.init(gpa, io);
 
     var pollers: std.ArrayList(*poller.Poller) = .empty;
     for (cfg.targets) |target| {
         const p = try gpa.create(poller.Poller);
-        p.* = try poller.Poller.init(gpa, io, target, &registry);
+        p.* = poller.Poller.init(gpa, io, target, &registry) catch |err| switch (err) {
+            error.CompileError => std.process.exit(1),
+            else => return err,
+        };
         try pollers.append(gpa, p);
     }
 
     const address = std.Io.net.IpAddress.parseLiteral(listen_addr) catch {
         std.log.err("invalid listen address: {s}", .{listen_addr});
-        return error.InvalidListenAddress;
+        std.process.exit(1);
     };
     var server = address.listen(io, .{ .reuse_address = true }) catch |err| {
         std.log.err("cannot listen on {s}: {t}", .{ listen_addr, err });
-        return err;
+        std.process.exit(1);
     };
 
     for (pollers.items) |p| {
@@ -70,9 +71,9 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(0);
 }
 
-fn usage(argv0: []const u8) error{InvalidUsage} {
-    std.log.err("usage: {s} --config <config.yaml> [--listen <addr>] (default {s})", .{ argv0, default_listen });
-    return error.InvalidUsage;
+fn usage(argv0: []const u8) noreturn {
+    std.log.err("usage: {s} [--config <path>] [--listen <addr>] (defaults: config.yaml, {s})", .{ argv0, default_listen });
+    std.process.exit(2);
 }
 
 fn installSignalHandlers() void {

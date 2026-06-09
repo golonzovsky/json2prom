@@ -1,0 +1,34 @@
+name: Zig
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "zig/**"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "zig/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./zig
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install libjq
+        run: sudo apt-get update && sudo apt-get install -y libjq-dev
+
+      - name: Build
+        run: zig build
+
+      - name: Test
+        run: zig build test

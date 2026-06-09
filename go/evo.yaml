@@ -19,7 +19,7 @@ targets:
           - name: max_capacity
             query: .max_capacity
   - name: limmat-water-temp
-    uri: https://api.existenz.ch/apiv1/hydro/latest?app=grafana-to-go&locations=2243&parameters=temperature
+    uri: https://api.existenz.ch/apiv1/hydro/latest?app=json2prom&locations=2243&parameters=temperature
     method: GET
     periodSeconds: 300
     metrics:

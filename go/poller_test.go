@@ -67,6 +67,43 @@ targets:
     periodSeconds: 60
     metrics: []
 `,
+		"no targets": `
+targets: []
+`,
+		"missing name": `
+targets:
+  - uri: http://example.com
+    periodSeconds: 60
+    metrics: []
+`,
+		"missing uri": `
+targets:
+  - name: t1
+    periodSeconds: 60
+    metrics: []
+`,
+		"missing metrics": `
+targets:
+  - name: t1
+    uri: http://example.com
+    periodSeconds: 60
+`,
+		"missing metric name": `
+targets:
+  - name: t1
+    uri: http://example.com
+    periodSeconds: 60
+    metrics:
+      - valueQuery: .val
+`,
+		"missing valueQuery": `
+targets:
+  - name: t1
+    uri: http://example.com
+    periodSeconds: 60
+    metrics:
+      - name: m1
+`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := LoadConfig(writeConfig(t, content)); err == nil {
@@ -147,7 +184,8 @@ func TestEvaluateItemsAndLabels(t *testing.T) {
 			Labels: []LabelQuery{
 				{Name: "str_label", Query: ".name"},
 				{Name: "num_label", Query: ".id"},
-				{Name: "missing_label", Query: ".nope"},
+				{Name: "null_label", Query: ".nope"},
+				{Name: "noresult_label", Query: "empty"},
 			},
 		}},
 	})
@@ -180,8 +218,11 @@ func TestEvaluateItemsAndLabels(t *testing.T) {
 	if la["num_label"] != "7" {
 		t.Errorf("num_label = %q, want 7 (JSON text)", la["num_label"])
 	}
-	if la["missing_label"] != "" {
-		t.Errorf("missing_label = %q, want empty", la["missing_label"])
+	if la["null_label"] != "null" {
+		t.Errorf("null_label = %q, want null (JSON text)", la["null_label"])
+	}
+	if la["noresult_label"] != "" {
+		t.Errorf("noresult_label = %q, want empty", la["noresult_label"])
 	}
 	if got := byName["b"].GetGauge().GetValue(); got != 42 {
 		t.Errorf("value = %v, want 42", got)
@@ -265,6 +306,24 @@ func TestEvaluateSkipsNonNumeric(t *testing.T) {
 	}
 	if got := series[0].GetGauge().GetValue(); got != 3 {
 		t.Errorf("value = %v, want 3", got)
+	}
+}
+
+func TestNewPollerRejectsUncompilableQuery(t *testing.T) {
+	tgt := Target{
+		Name:          "t",
+		URI:           "http://example.com",
+		PeriodSeconds: 60,
+		Metrics: []MetricConfig{{
+			Name:       "bad_metric",
+			ValueQuery: "foo(.)",
+		}},
+	}
+	if err := tgt.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewPoller(tgt, prometheus.NewRegistry(), slog.New(slog.DiscardHandler)); err == nil {
+		t.Error("expected compile error for undefined function, got nil")
 	}
 }
 

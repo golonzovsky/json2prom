@@ -46,6 +46,9 @@ func LoadConfig(path string) (*Config, error) {
 	if err := yaml.Unmarshal(raw, &cfg); err != nil {
 		return nil, err
 	}
+	if len(cfg.Targets) == 0 {
+		return nil, fmt.Errorf("config has no targets")
+	}
 	for i := range cfg.Targets {
 		if err := cfg.Targets[i].normalize(); err != nil {
 			return nil, err
@@ -55,6 +58,12 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func (t *Target) normalize() error {
+	if t.Name == "" {
+		return fmt.Errorf("target name is required")
+	}
+	if t.URI == "" {
+		return fmt.Errorf("target %s: uri is required", t.Name)
+	}
 	if t.Method == "" {
 		t.Method = http.MethodGet
 	}
@@ -69,9 +78,19 @@ func (t *Target) normalize() error {
 	if t.UseBearerTokenFrom != "" && os.Getenv(t.UseBearerTokenFrom) == "" {
 		return fmt.Errorf("target %s: bearer token env var %s is not set", t.Name, t.UseBearerTokenFrom)
 	}
+	if t.Metrics == nil {
+		return fmt.Errorf("target %s: metrics is required", t.Name)
+	}
 	for i := range t.Metrics {
-		if t.Metrics[i].ItemsQuery == "" {
-			t.Metrics[i].ItemsQuery = "."
+		m := &t.Metrics[i]
+		if m.Name == "" {
+			return fmt.Errorf("target %s: metric name is required", t.Name)
+		}
+		if m.ValueQuery == "" {
+			return fmt.Errorf("target %s: metric %s: valueQuery is required", t.Name, m.Name)
+		}
+		if m.ItemsQuery == "" {
+			m.ItemsQuery = "."
 		}
 	}
 	return nil

@@ -25,10 +25,18 @@ type Poller struct {
 }
 
 type metricBinding struct {
-	itemsQuery   *gojq.Query
-	valueQuery   *gojq.Query
-	labelQueries []*gojq.Query
+	itemsQuery   *gojq.Code
+	valueQuery   *gojq.Code
+	labelQueries []*gojq.Code
 	gauge        *prometheus.GaugeVec
+}
+
+func compileQuery(src string) (*gojq.Code, error) {
+	q, err := gojq.Parse(src)
+	if err != nil {
+		return nil, err
+	}
+	return gojq.Compile(q)
 }
 
 func NewPoller(tgt Target, reg prometheus.Registerer, logger *slog.Logger) (*Poller, error) {
@@ -48,21 +56,21 @@ func NewPoller(tgt Target, reg prometheus.Registerer, logger *slog.Logger) (*Pol
 }
 
 func prepareMetric(mc MetricConfig, reg prometheus.Registerer) (*metricBinding, error) {
-	itemsQ, err := gojq.Parse(mc.ItemsQuery)
+	itemsQ, err := compileQuery(mc.ItemsQuery)
 	if err != nil {
-		return nil, fmt.Errorf("itemsQuery parse: %w", err)
+		return nil, fmt.Errorf("itemsQuery: %w", err)
 	}
-	valueQ, err := gojq.Parse(mc.ValueQuery)
+	valueQ, err := compileQuery(mc.ValueQuery)
 	if err != nil {
-		return nil, fmt.Errorf("valueQuery parse: %w", err)
+		return nil, fmt.Errorf("valueQuery: %w", err)
 	}
 
 	labelNames := []string{"target"}
-	var labelQueries []*gojq.Query
+	var labelQueries []*gojq.Code
 	for _, l := range mc.Labels {
-		q, err := gojq.Parse(l.Query)
+		q, err := compileQuery(l.Query)
 		if err != nil {
-			return nil, fmt.Errorf("label %s query parse: %w", l.Name, err)
+			return nil, fmt.Errorf("label %s query: %w", l.Name, err)
 		}
 		labelNames = append(labelNames, l.Name)
 		labelQueries = append(labelQueries, q)
@@ -186,7 +194,8 @@ func (p *Poller) evaluate(root any) {
 			for _, q := range mb.labelQueries {
 				lv, ok := q.Run(item).Next()
 				if !ok {
-					lv = nil
+					labelVals = append(labelVals, "")
+					continue
 				}
 				labelVals = append(labelVals, labelValue(lv))
 			}
@@ -216,8 +225,6 @@ func toFloat64(v any) (float64, bool) {
 
 func labelValue(v any) string {
 	switch t := v.(type) {
-	case nil:
-		return ""
 	case string:
 		return t
 	case error:

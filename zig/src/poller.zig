@@ -3,6 +3,8 @@ const config = @import("config.zig");
 const metrics = @import("metrics.zig");
 const jq = @import("jq.zig");
 
+const http_timeout_seconds = 10;
+
 pub const CompiledMetric = struct {
     name: []const u8,
     items_query: jq.Query,
@@ -215,22 +217,7 @@ pub const Poller = struct {
         var aw: std.Io.Writer.Allocating = .init(self.allocator);
         defer aw.deinit();
 
-        const result = try self.client.fetch(.{
-            .location = .{ .url = self.target.uri },
-            .method = switch (self.target.method) {
-                .GET => .GET,
-                .POST => .POST,
-                .PUT => .PUT,
-                .DELETE => .DELETE,
-            },
-            .payload = self.form_body,
-            .extra_headers = self.extra_headers,
-            .headers = .{
-                .authorization = if (self.auth_header) |h| .{ .override = h } else .default,
-                .content_type = if (self.form_body != null) .{ .override = "application/x-www-form-urlencoded" } else .default,
-            },
-            .response_writer = &aw.writer,
-        });
+        const result = try self.fetchWithTimeout(&aw.writer);
         if (result.status.class() != .success) {
             std.log.err("[{s}] HTTP {d} from {s}, skipping cycle", .{ self.target.name, @intFromEnum(result.status), self.target.uri });
             return;
@@ -245,6 +232,42 @@ pub const Poller = struct {
         for (self.compiled) |*cm| {
             try evaluateMetric(self.allocator, self.target.name, cm, root);
         }
+    }
+
+    // std.http.Client has no timeout option, so race the fetch against a deadline and cancel it.
+    fn fetchWithTimeout(self: *Poller, response_writer: *std.Io.Writer) !std.http.Client.FetchResult {
+        var done: std.Io.Event = .unset;
+        var future = try self.io.concurrent(doFetch, .{ self, response_writer, &done });
+        const deadline: std.Io.Clock.Timestamp = .fromNow(self.io, .{ .raw = .fromSeconds(http_timeout_seconds), .clock = .awake });
+        while (true) {
+            done.waitTimeout(self.io, .{ .deadline = deadline }) catch |err| {
+                // waitTimeout reports spurious wakeups as Timeout; only trust it past the deadline
+                if (err == error.Timeout and std.Io.Clock.Timestamp.now(self.io, .awake).compare(.lt, deadline)) continue;
+                if (future.cancel(self.io)) |_| {} else |_| {}
+                return err;
+            };
+            return future.await(self.io);
+        }
+    }
+
+    fn doFetch(self: *Poller, response_writer: *std.Io.Writer, done: *std.Io.Event) std.http.Client.FetchError!std.http.Client.FetchResult {
+        defer done.set(self.io);
+        return self.client.fetch(.{
+            .location = .{ .url = self.target.uri },
+            .method = switch (self.target.method) {
+                .GET => .GET,
+                .POST => .POST,
+                .PUT => .PUT,
+                .DELETE => .DELETE,
+            },
+            .payload = self.form_body,
+            .extra_headers = self.extra_headers,
+            .headers = .{
+                .authorization = if (self.auth_header) |h| .{ .override = h } else .default,
+                .content_type = if (self.form_body != null) .{ .override = "application/x-www-form-urlencoded" } else .default,
+            },
+            .response_writer = response_writer,
+        });
     }
 };
 
