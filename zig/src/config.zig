@@ -1,23 +1,36 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const yaml = @import("yaml");
 
-pub const MetricConfig = struct {
-    name: []const u8,
-    valueQuery: []const u8,
-    labels: []LabelConfig,
-};
+pub const Method = enum { GET, POST, PUT, DELETE };
 
 pub const LabelConfig = struct {
     name: []const u8,
     query: []const u8,
 };
 
+pub const MetricConfig = struct {
+    name: []const u8,
+    itemsQuery: []const u8 = ".",
+    valueQuery: []const u8,
+    labels: []const LabelConfig = &.{},
+};
+
+pub const Param = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
 pub const TargetConfig = struct {
     name: []const u8,
     uri: []const u8,
-    method: []const u8,
+    method: Method = .GET,
+    useBearerTokenFrom: ?[]const u8 = null,
+    bearerToken: ?[]const u8 = null,
+    headers: []const Param = &.{},
+    formParams: []const Param = &.{},
     periodSeconds: u32,
-    metrics: []MetricConfig,
+    metrics: []const MetricConfig,
 };
 
 pub const Config = struct {
@@ -29,95 +42,174 @@ pub const Config = struct {
     }
 };
 
-pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !Config {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+pub const Error = error{InvalidConfig} || std.mem.Allocator.Error;
 
-    // Create an arena allocator for all config allocations
+pub fn load(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Config {
+    const source = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch |err| {
+        logError("cannot read config file {s}: {t}", .{ path, err });
+        return error.InvalidConfig;
+    };
+    defer allocator.free(source);
+    return parse(allocator, source);
+}
+
+pub fn parse(allocator: std.mem.Allocator, source: []const u8) Error!Config {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
+    const aa = arena.allocator();
 
-    const arena_allocator = arena.allocator();
-
-    const content = try file.readToEndAlloc(arena_allocator, 1024 * 1024);
-
-    var parsed = yaml.Yaml{ .source = content };
-    defer parsed.deinit(arena_allocator);
-
-    try parsed.load(arena_allocator);
-
-    // Parse YAML into Config struct using the arena allocator
-    const targets = try parseYamlToConfig(arena_allocator, &parsed);
-
-    return Config{
-        .targets = targets,
-        .arena = arena,
+    var doc = yaml.Yaml{ .source = source };
+    defer doc.deinit(allocator);
+    doc.load(allocator) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            logError("invalid YAML: {t}", .{err});
+            return error.InvalidConfig;
+        },
     };
-}
 
-fn parseYamlToConfig(allocator: std.mem.Allocator, doc: *yaml.Yaml) ![]TargetConfig {
-    if (doc.docs.items.len == 0) return error.NoDocument;
+    if (doc.docs.items.len == 0) return fail("empty config document", .{});
+    const root = doc.docs.items[0].asMap() orelse return fail("config root must be a map", .{});
+    const targets_node = root.get("targets") orelse return fail("missing 'targets'", .{});
+    const targets_list = targets_node.asList() orelse return fail("'targets' must be a list", .{});
 
-    const root = doc.docs.items[0];
-    const targets_node = root.map.get("targets") orelse return error.NoTargets;
-
-    var targets = std.ArrayList(TargetConfig).init(allocator);
-
-    for (targets_node.list) |target_node| {
-        const name = try allocator.dupe(u8, target_node.map.get("name").?.string);
-        const uri = try allocator.dupe(u8, target_node.map.get("uri").?.string);
-        const method = try allocator.dupe(u8, target_node.map.get("method").?.string);
-        const periodSeconds: u32 = @intCast(target_node.map.get("periodSeconds").?.int);
-
-        var metrics = std.ArrayList(MetricConfig).init(allocator);
-
-        const metrics_node = target_node.map.get("metrics").?;
-        for (metrics_node.list) |metric_node| {
-            const metric_name = try allocator.dupe(u8, metric_node.map.get("name").?.string);
-            const valueQuery = try allocator.dupe(u8, metric_node.map.get("valueQuery").?.string);
-
-            var labels = std.ArrayList(LabelConfig).init(allocator);
-
-            if (metric_node.map.get("labels")) |labels_node| {
-                for (labels_node.list) |label_node| {
-                    const label_name = try allocator.dupe(u8, label_node.map.get("name").?.string);
-                    const query = try allocator.dupe(u8, label_node.map.get("query").?.string);
-
-                    try labels.append(.{
-                        .name = label_name,
-                        .query = query,
-                    });
-                }
-            }
-
-            try metrics.append(.{
-                .name = metric_name,
-                .valueQuery = valueQuery,
-                .labels = try labels.toOwnedSlice(),
-            });
-        }
-
-        try targets.append(.{
-            .name = name,
-            .uri = uri,
-            .method = method,
-            .periodSeconds = periodSeconds,
-            .metrics = try metrics.toOwnedSlice(),
-        });
+    var targets: std.ArrayList(TargetConfig) = .empty;
+    for (targets_list) |node| {
+        try targets.append(aa, try parseTarget(aa, node));
     }
 
-    return targets.toOwnedSlice();
+    return .{ .targets = try targets.toOwnedSlice(aa), .arena = arena };
 }
 
-test "loadConfig - valid YAML" {
-    const test_yaml =
+fn parseTarget(aa: std.mem.Allocator, node: yaml.Yaml.Value) Error!TargetConfig {
+    const map = node.asMap() orelse return fail("target must be a map", .{});
+    const name = try requiredString(aa, map, "name", "target");
+
+    var target: TargetConfig = .{
+        .name = name,
+        .uri = try requiredString(aa, map, "uri", name),
+        .periodSeconds = undefined,
+        .metrics = undefined,
+    };
+
+    if (try optionalString(aa, map, "method", name)) |m| {
+        target.method = std.meta.stringToEnum(Method, m) orelse
+            return fail("target {s}: invalid method '{s}' (want GET/POST/PUT/DELETE)", .{ name, m });
+    }
+    target.useBearerTokenFrom = try optionalString(aa, map, "useBearerTokenFrom", name);
+    target.headers = try parseParams(aa, map, "headers", name);
+    target.formParams = try parseParams(aa, map, "formParams", name);
+
+    const period_str = try requiredString(aa, map, "periodSeconds", name);
+    const period = std.fmt.parseInt(i64, period_str, 10) catch
+        return fail("target {s}: periodSeconds must be an integer, got '{s}'", .{ name, period_str });
+    if (period <= 0) return fail("target {s}: periodSeconds must be > 0, got {d}", .{ name, period });
+    target.periodSeconds = std.math.cast(u32, period) orelse
+        return fail("target {s}: periodSeconds too large", .{name});
+
+    const metrics_node = map.get("metrics") orelse return fail("target {s}: missing 'metrics'", .{name});
+    const metrics_list = metrics_node.asList() orelse return fail("target {s}: 'metrics' must be a list", .{name});
+    var metrics: std.ArrayList(MetricConfig) = .empty;
+    for (metrics_list) |metric_node| {
+        try metrics.append(aa, try parseMetric(aa, metric_node, name));
+    }
+    target.metrics = try metrics.toOwnedSlice(aa);
+
+    return target;
+}
+
+fn parseMetric(aa: std.mem.Allocator, node: yaml.Yaml.Value, target_name: []const u8) Error!MetricConfig {
+    const map = node.asMap() orelse return fail("target {s}: metric must be a map", .{target_name});
+    const name = try requiredString(aa, map, "name", target_name);
+
+    var metric: MetricConfig = .{
+        .name = name,
+        .valueQuery = try requiredString(aa, map, "valueQuery", name),
+    };
+    if (try optionalString(aa, map, "itemsQuery", name)) |q| metric.itemsQuery = q;
+
+    if (map.get("labels")) |labels_node| {
+        const labels_list = labels_node.asList() orelse return fail("metric {s}: 'labels' must be a list", .{name});
+        var labels: std.ArrayList(LabelConfig) = .empty;
+        for (labels_list) |label_node| {
+            const label_map = label_node.asMap() orelse return fail("metric {s}: label must be a map", .{name});
+            try labels.append(aa, .{
+                .name = try requiredString(aa, label_map, "name", name),
+                .query = try requiredString(aa, label_map, "query", name),
+            });
+        }
+        metric.labels = try labels.toOwnedSlice(aa);
+    }
+
+    return metric;
+}
+
+fn parseParams(aa: std.mem.Allocator, map: yaml.Yaml.Map, key: []const u8, target_name: []const u8) Error![]Param {
+    const node = map.get(key) orelse return &.{};
+    const param_map = node.asMap() orelse return fail("target {s}: '{s}' must be a map", .{ target_name, key });
+
+    var params: std.ArrayList(Param) = .empty;
+    for (param_map.keys(), param_map.values()) |k, v| {
+        const value = v.asScalar() orelse
+            return fail("target {s}: {s}.{s} must be a string", .{ target_name, key, k });
+        try params.append(aa, .{
+            .name = try aa.dupe(u8, k),
+            .value = try aa.dupe(u8, value),
+        });
+    }
+    return params.toOwnedSlice(aa);
+}
+
+fn requiredString(aa: std.mem.Allocator, map: yaml.Yaml.Map, key: []const u8, context: []const u8) Error![]u8 {
+    return try optionalString(aa, map, key, context) orelse
+        fail("{s}: missing required field '{s}'", .{ context, key });
+}
+
+fn optionalString(aa: std.mem.Allocator, map: yaml.Yaml.Map, key: []const u8, context: []const u8) Error!?[]u8 {
+    const node = map.get(key) orelse return null;
+    const scalar = node.asScalar() orelse return fail("{s}: '{s}' must be a scalar", .{ context, key });
+    return try aa.dupe(u8, scalar);
+}
+
+fn fail(comptime fmt: []const u8, args: anytype) error{InvalidConfig} {
+    logError("config: " ++ fmt, args);
+    return error.InvalidConfig;
+}
+
+// The test runner fails any test that logs at error level.
+pub fn logError(comptime fmt: []const u8, args: anytype) void {
+    if (builtin.is_test) std.log.warn(fmt, args) else std.log.err(fmt, args);
+}
+
+/// `env` needs a `get([]const u8) ?[]const u8` method; pass `init.environ_map`.
+pub fn resolveBearerTokens(targets: []TargetConfig, env: anytype) error{MissingBearerToken}!void {
+    for (targets) |*target| {
+        const env_name = target.useBearerTokenFrom orelse continue;
+        const token = env.get(env_name) orelse "";
+        if (token.len == 0) {
+            logError("config: target {s}: useBearerTokenFrom is set but environment variable {s} is missing or empty", .{ target.name, env_name });
+            return error.MissingBearerToken;
+        }
+        target.bearerToken = token;
+    }
+}
+
+test "full config with all fields" {
+    const source =
         \\targets:
         \\  - name: test-target
         \\    uri: https://example.com/api
-        \\    method: GET
+        \\    method: POST
+        \\    useBearerTokenFrom: MY_TOKEN
+        \\    headers:
+        \\      X-Custom: abc
+        \\      X-Other: def
+        \\    formParams:
+        \\      grant_type: client_credentials
         \\    periodSeconds: 30
         \\    metrics:
         \\      - name: test_metric
+        \\        itemsQuery: .items[]
         \\        valueQuery: .value
         \\        labels:
         \\          - name: label1
@@ -126,46 +218,62 @@ test "loadConfig - valid YAML" {
         \\            query: .label2
     ;
 
-    // Write test file
-    const test_file = "test_config.yaml";
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    defer {
-        file.close();
-        std.fs.cwd().deleteFile(test_file) catch {};
-    }
-    try file.writeAll(test_yaml);
+    var cfg = try parse(std.testing.allocator, source);
+    defer cfg.deinit();
 
-    // Test loading
-    var config = try loadConfig(std.testing.allocator, test_file);
-    defer config.deinit();
-
-    try std.testing.expectEqual(@as(usize, 1), config.targets.len);
-    
-    const target = config.targets[0];
+    try std.testing.expectEqual(@as(usize, 1), cfg.targets.len);
+    const target = cfg.targets[0];
     try std.testing.expectEqualStrings("test-target", target.name);
     try std.testing.expectEqualStrings("https://example.com/api", target.uri);
-    try std.testing.expectEqualStrings("GET", target.method);
+    try std.testing.expectEqual(Method.POST, target.method);
+    try std.testing.expectEqualStrings("MY_TOKEN", target.useBearerTokenFrom.?);
     try std.testing.expectEqual(@as(u32, 30), target.periodSeconds);
-    
-    try std.testing.expectEqual(@as(usize, 1), target.metrics.len);
-    
+
+    try std.testing.expectEqual(@as(usize, 2), target.headers.len);
+    try std.testing.expectEqualStrings("X-Custom", target.headers[0].name);
+    try std.testing.expectEqualStrings("abc", target.headers[0].value);
+    try std.testing.expectEqual(@as(usize, 1), target.formParams.len);
+    try std.testing.expectEqualStrings("grant_type", target.formParams[0].name);
+
     const metric = target.metrics[0];
     try std.testing.expectEqualStrings("test_metric", metric.name);
+    try std.testing.expectEqualStrings(".items[]", metric.itemsQuery);
     try std.testing.expectEqualStrings(".value", metric.valueQuery);
     try std.testing.expectEqual(@as(usize, 2), metric.labels.len);
-    
     try std.testing.expectEqualStrings("label1", metric.labels[0].name);
     try std.testing.expectEqualStrings(".label1", metric.labels[0].query);
-    try std.testing.expectEqualStrings("label2", metric.labels[1].name);
-    try std.testing.expectEqualStrings(".label2", metric.labels[1].query);
 }
 
-test "loadConfig - multiple targets" {
-    const test_yaml =
+test "defaults for optional fields" {
+    const source =
+        \\targets:
+        \\  - name: minimal
+        \\    uri: https://example.com
+        \\    periodSeconds: 10
+        \\    metrics:
+        \\      - name: simple_metric
+        \\        valueQuery: .count
+    ;
+
+    var cfg = try parse(std.testing.allocator, source);
+    defer cfg.deinit();
+
+    const target = cfg.targets[0];
+    try std.testing.expectEqual(Method.GET, target.method);
+    try std.testing.expectEqual(@as(?[]const u8, null), target.useBearerTokenFrom);
+    try std.testing.expectEqual(@as(usize, 0), target.headers.len);
+    try std.testing.expectEqual(@as(usize, 0), target.formParams.len);
+
+    const metric = target.metrics[0];
+    try std.testing.expectEqualStrings(".", metric.itemsQuery);
+    try std.testing.expectEqual(@as(usize, 0), metric.labels.len);
+}
+
+test "multiple targets" {
+    const source =
         \\targets:
         \\  - name: target1
         \\    uri: https://api1.com
-        \\    method: GET
         \\    periodSeconds: 60
         \\    metrics:
         \\      - name: metric1
@@ -179,49 +287,132 @@ test "loadConfig - multiple targets" {
         \\        valueQuery: .data
     ;
 
-    const test_file = "test_multi_config.yaml";
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    defer {
-        file.close();
-        std.fs.cwd().deleteFile(test_file) catch {};
-    }
-    try file.writeAll(test_yaml);
+    var cfg = try parse(std.testing.allocator, source);
+    defer cfg.deinit();
 
-    var config = try loadConfig(std.testing.allocator, test_file);
-    defer config.deinit();
-
-    try std.testing.expectEqual(@as(usize, 2), config.targets.len);
-    
-    try std.testing.expectEqualStrings("target1", config.targets[0].name);
-    try std.testing.expectEqual(@as(u32, 60), config.targets[0].periodSeconds);
-    
-    try std.testing.expectEqualStrings("target2", config.targets[1].name);
-    try std.testing.expectEqual(@as(u32, 120), config.targets[1].periodSeconds);
+    try std.testing.expectEqual(@as(usize, 2), cfg.targets.len);
+    try std.testing.expectEqualStrings("target1", cfg.targets[0].name);
+    try std.testing.expectEqual(@as(u32, 60), cfg.targets[0].periodSeconds);
+    try std.testing.expectEqualStrings("target2", cfg.targets[1].name);
+    try std.testing.expectEqual(Method.POST, cfg.targets[1].method);
 }
 
-test "loadConfig - no labels" {
-    const test_yaml =
+test "missing required fields" {
+    const cases = [_][]const u8{
+        // missing name
         \\targets:
-        \\  - name: no-labels
-        \\    uri: https://example.com
-        \\    method: GET
+        \\  - uri: https://example.com
         \\    periodSeconds: 10
         \\    metrics:
-        \\      - name: simple_metric
-        \\        valueQuery: .count
-    ;
-
-    const test_file = "test_no_labels.yaml";
-    const file = try std.fs.cwd().createFile(test_file, .{});
-    defer {
-        file.close();
-        std.fs.cwd().deleteFile(test_file) catch {};
+        \\      - name: m
+        \\        valueQuery: .v
+        ,
+        // missing uri
+        \\targets:
+        \\  - name: t
+        \\    periodSeconds: 10
+        \\    metrics:
+        \\      - name: m
+        \\        valueQuery: .v
+        ,
+        // missing periodSeconds
+        \\targets:
+        \\  - name: t
+        \\    uri: https://example.com
+        \\    metrics:
+        \\      - name: m
+        \\        valueQuery: .v
+        ,
+        // missing valueQuery
+        \\targets:
+        \\  - name: t
+        \\    uri: https://example.com
+        \\    periodSeconds: 10
+        \\    metrics:
+        \\      - name: m
+        ,
+        // missing metrics
+        \\targets:
+        \\  - name: t
+        \\    uri: https://example.com
+        \\    periodSeconds: 10
+        ,
+    };
+    for (cases) |source| {
+        try std.testing.expectError(error.InvalidConfig, parse(std.testing.allocator, source));
     }
-    try file.writeAll(test_yaml);
+}
 
-    var config = try loadConfig(std.testing.allocator, test_file);
-    defer config.deinit();
+test "periodSeconds must be positive" {
+    const cases = [_][]const u8{ "0", "-5", "abc" };
+    for (cases) |period| {
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\targets:
+            \\  - name: t
+            \\    uri: https://example.com
+            \\    periodSeconds: {s}
+            \\    metrics:
+            \\      - name: m
+            \\        valueQuery: .v
+        , .{period});
+        defer std.testing.allocator.free(source);
+        try std.testing.expectError(error.InvalidConfig, parse(std.testing.allocator, source));
+    }
+}
 
-    const metric = config.targets[0].metrics[0];
-    try std.testing.expectEqual(@as(usize, 0), metric.labels.len);
+test "invalid method rejected" {
+    const source =
+        \\targets:
+        \\  - name: t
+        \\    uri: https://example.com
+        \\    method: PATCH
+        \\    periodSeconds: 10
+        \\    metrics:
+        \\      - name: m
+        \\        valueQuery: .v
+    ;
+    try std.testing.expectError(error.InvalidConfig, parse(std.testing.allocator, source));
+}
+
+const FakeEnv = struct {
+    name: []const u8,
+    value: []const u8,
+
+    fn get(self: @This(), key: []const u8) ?[]const u8 {
+        return if (std.mem.eql(u8, key, self.name)) self.value else null;
+    }
+};
+
+test "bearer token resolution" {
+    var targets = [_]TargetConfig{.{
+        .name = "t",
+        .uri = "https://example.com",
+        .useBearerTokenFrom = "MY_TOKEN",
+        .periodSeconds = 10,
+        .metrics = &.{},
+    }};
+
+    try resolveBearerTokens(&targets, FakeEnv{ .name = "MY_TOKEN", .value = "s3cret" });
+    try std.testing.expectEqualStrings("s3cret", targets[0].bearerToken.?);
+
+    targets[0].bearerToken = null;
+    try std.testing.expectError(
+        error.MissingBearerToken,
+        resolveBearerTokens(&targets, FakeEnv{ .name = "OTHER", .value = "x" }),
+    );
+    try std.testing.expectError(
+        error.MissingBearerToken,
+        resolveBearerTokens(&targets, FakeEnv{ .name = "MY_TOKEN", .value = "" }),
+    );
+}
+
+test "no bearer config needs no env" {
+    var targets = [_]TargetConfig{.{
+        .name = "t",
+        .uri = "https://example.com",
+        .periodSeconds = 10,
+        .metrics = &.{},
+    }};
+    try resolveBearerTokens(&targets, FakeEnv{ .name = "X", .value = "y" });
+    try std.testing.expectEqual(@as(?[]const u8, null), targets[0].bearerToken);
 }

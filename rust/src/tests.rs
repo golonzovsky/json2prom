@@ -1,76 +1,143 @@
-#[cfg(test)]
-mod test_utils {
-    use crate::config::Target;
-    use crate::config::load_config;
-    use crate::response::extract_metrics;
+use crate::config::{MetricDef, load_config};
+use crate::extract::MetricExtractor;
+use crate::poller::Poller;
 
-    fn create_test_target() -> Target {
-        let config_file = "evo.yaml";
+use jaq_json::Val;
+use prometheus::Registry;
+use std::collections::HashMap;
 
-        // Load the first target from the config file
-        let config = load_config(config_file).expect("Failed to load config file");
-        let mut target = config
-            .targets
-            .into_iter()
-            .next()
-            .expect("No targets in config file");
+const EVO_RESPONSE: &str = r#"{"id":"6c13f942-01dc-4141-8b0b-328291cc97ca","name":"EVO Zurich Enge","max_capacity":90,"current":35,"percentageUsed":38.88888888888889}"#;
 
-        target.name = "test-evo-enge".to_string();
+fn parse(body: &str) -> Val {
+    jaq_json::read::parse_single(body.as_bytes()).expect("valid JSON")
+}
 
-        target
-    }
+fn metric_def(yaml: &str) -> MetricDef {
+    serde_yaml_ng::from_str(yaml).expect("valid metric definition")
+}
 
-    const JSON_RESPONSE: &str = r#"{"id":"6c13f942-01dc-4141-8b0b-328291cc97ca","name":"EVO Zurich Enge","max_capacity":90,"current":35,"percentageUsed":38.88888888888889}"#;
+fn labels(values: &[&str]) -> Vec<String> {
+    values.iter().map(ToString::to_string).collect()
+}
 
-    #[test]
-    fn test_json_mode() {
-        let target = create_test_target();
-        let metrics = extract_metrics(&target, JSON_RESPONSE);
+#[test]
+fn evo_extraction_with_default_items_query() {
+    let config = load_config("evo.yaml").expect("failed to load evo.yaml");
+    let target = &config.targets[0];
+    assert_eq!(target.name, "evo-enge");
+    assert_eq!(target.metrics[0].items_query, ".");
 
-        assert_eq!(metrics.len(), 2, "Should extract 2 metrics");
+    let root = parse(EVO_RESPONSE);
 
-        // Sort metrics by name to ensure consistent order for testing
-        let mut sorted_metrics = metrics;
-        sorted_metrics.sort_by(|a, b| a.0.cmp(&b.0));
+    let percentage = MetricExtractor::compile(&target.metrics[0]).unwrap();
+    assert_eq!(
+        percentage.extract(&root),
+        vec![(labels(&["EVO Zurich Enge", "90"]), 38.88888888888889)]
+    );
 
-        // Check capacity metric
-        let (name, labels, value) = &sorted_metrics[0];
-        assert_eq!(name, "evo_capacity");
-        assert_eq!(labels.len(), 3);
-        assert_eq!(labels[0], "test-evo-enge");
-        assert_eq!(labels[1], "EVO Zurich Enge");
-        assert_eq!(labels[2], "90");
-        assert_eq!(*value, 35.0);
+    let capacity = MetricExtractor::compile(&target.metrics[1]).unwrap();
+    assert_eq!(
+        capacity.extract(&root),
+        vec![(labels(&["EVO Zurich Enge", "90"]), 35.0)]
+    );
+}
 
-        // Check percentage metric
-        let (name, labels, value) = &sorted_metrics[1];
-        assert_eq!(name, "evo_percentage");
-        assert_eq!(labels.len(), 3);
-        assert_eq!(labels[0], "test-evo-enge");
-        assert_eq!(labels[1], "EVO Zurich Enge");
-        assert_eq!(labels[2], "90");
-        assert_eq!(*value, 38.88888888888889);
-    }
+#[test]
+fn items_query_iterates_array() {
+    let def = metric_def(
+        r#"
+name: river_temp
+itemsQuery: .payload[]
+valueQuery: .val
+labels:
+  - name: location
+    query: "\"Limmat-Baden\""
+  - name: station_id
+    query: .loc
+"#,
+    );
+    let extractor = MetricExtractor::compile(&def).unwrap();
+    let root = parse(r#"{"payload":[{"val":21.5,"loc":2243},{"val":18,"loc":2244}]}"#);
+    assert_eq!(
+        extractor.extract(&root),
+        vec![
+            (labels(&["Limmat-Baden", "2243"]), 21.5),
+            (labels(&["Limmat-Baden", "2244"]), 18.0),
+        ]
+    );
+}
 
-    #[test]
-    fn test_invalid_input() {
-        let target = create_test_target();
-        let invalid_data = "this is not valid JSON";
-        let metrics = extract_metrics(&target, invalid_data);
+#[test]
+fn bool_values_map_to_one_and_zero() {
+    let def = metric_def("{name: up, itemsQuery: '.checks[]', valueQuery: .ok}");
+    let extractor = MetricExtractor::compile(&def).unwrap();
+    let root = parse(r#"{"checks":[{"ok":true},{"ok":false}]}"#);
+    assert_eq!(extractor.extract(&root), vec![(vec![], 1.0), (vec![], 0.0)]);
+}
 
-        assert_eq!(
-            metrics.len(),
-            0,
-            "Should return empty metrics for invalid data"
-        );
+#[test]
+fn non_numeric_values_are_skipped() {
+    let def = metric_def("{name: vals, itemsQuery: '.items[]', valueQuery: .v}");
+    let extractor = MetricExtractor::compile(&def).unwrap();
+    let root = parse(r#"{"items":[{"v":"high"},{"v":null},{"v":[1]},{"v":1.5}]}"#);
+    assert_eq!(extractor.extract(&root), vec![(vec![], 1.5)]);
+}
 
-        let target = create_test_target();
-        let metrics = extract_metrics(&target, invalid_data);
+#[test]
+fn bad_query_fails_to_compile() {
+    let def = metric_def("{name: broken, valueQuery: '.foo[' }");
+    assert!(MetricExtractor::compile(&def).is_err());
+}
 
-        assert_eq!(
-            metrics.len(),
-            0,
-            "Should return empty metrics for invalid XML data"
-        );
-    }
+fn gauge_series(registry: &Registry, name: &str) -> Vec<(HashMap<String, String>, f64)> {
+    registry
+        .gather()
+        .iter()
+        .filter(|mf| mf.name() == name)
+        .flat_map(|mf| mf.get_metric())
+        .map(|m| {
+            let labels = m
+                .get_label()
+                .iter()
+                .map(|l| (l.name().to_string(), l.value().to_string()))
+                .collect();
+            (labels, m.get_gauge().value())
+        })
+        .collect()
+}
+
+#[test]
+fn poller_writes_target_label_and_resets_stale_series() {
+    let config = load_config("evo.yaml").expect("failed to load evo.yaml");
+    let target = config.targets.into_iter().next().unwrap();
+    let registry = Registry::new();
+    let poller = Poller::new(target, &registry).unwrap();
+
+    poller.update(EVO_RESPONSE);
+    let series = gauge_series(&registry, "evo_capacity");
+    assert_eq!(series.len(), 1);
+    let (labels, value) = &series[0];
+    assert_eq!(labels["target"], "evo-enge");
+    assert_eq!(labels["name"], "EVO Zurich Enge");
+    assert_eq!(labels["max_capacity"], "90");
+    assert_eq!(*value, 35.0);
+
+    let help = registry
+        .gather()
+        .into_iter()
+        .find(|mf| mf.name() == "evo_capacity")
+        .unwrap()
+        .help()
+        .to_string();
+    assert_eq!(help, "evo_capacity generated by json2prom");
+
+    poller.update(r#"{"name":"Other","max_capacity":50,"current":7,"percentageUsed":14.0}"#);
+    let series = gauge_series(&registry, "evo_capacity");
+    assert_eq!(series.len(), 1, "stale series must be reset");
+    assert_eq!(series[0].0["name"], "Other");
+    assert_eq!(series[0].1, 7.0);
+
+    poller.update("this is not valid JSON");
+    let series = gauge_series(&registry, "evo_capacity");
+    assert_eq!(series.len(), 1, "invalid body must not wipe metrics");
 }

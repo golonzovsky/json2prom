@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,7 +23,7 @@ pub struct Target {
     pub metrics: Vec<MetricDef>,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone, Copy, Default)]
 pub enum Method {
     #[serde(rename = "GET")]
     #[default]
@@ -34,17 +34,6 @@ pub enum Method {
     Put,
     #[serde(rename = "DELETE")]
     Delete,
-}
-
-impl Method {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Method::Get => "GET",
-            Method::Post => "POST",
-            Method::Put => "PUT",
-            Method::Delete => "DELETE",
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -72,6 +61,13 @@ pub struct LabelQuery {
 
 pub fn load_config(path: impl AsRef<Path>) -> Result<Config> {
     let contents = std::fs::read_to_string(path)?;
-    let config = serde_yaml::from_str(&contents)?;
+    let config: Config = serde_yaml_ng::from_str(&contents)?;
+    for target in &config.targets {
+        ensure!(
+            target.period_seconds > 0,
+            "target '{}': periodSeconds must be > 0",
+            target.name
+        );
+    }
     Ok(config)
 }

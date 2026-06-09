@@ -1,4 +1,4 @@
-FROM golang:1.24.3 as builder
+FROM golang:1.26 AS builder
 
 WORKDIR /usr/src/app
 COPY . .
@@ -19,4 +19,4 @@ COPY --from=builder /usr/src/app/json2prom /app/json2prom
 ENTRYPOINT ["/app/json2prom", "--config", "/etc/json2prom/config.yaml", "--log-level", "debug"]
 
 # Expose Prometheus metrics port
-EXPOSE 9100
+EXPOSE 9101

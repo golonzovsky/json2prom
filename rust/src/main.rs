@@ -1,6 +1,6 @@
 mod config;
+mod extract;
 mod poller;
-mod response;
 #[cfg(test)]
 mod tests;
 
@@ -17,25 +17,21 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 #[command(name = "json2prom")]
-#[command(about = "prometheus proxy exporter or curl jq queries")]
+#[command(about = "prometheus exporter for JSON HTTP APIs via jq queries")]
 struct Args {
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "config.yaml")]
     config: String,
 
     #[arg(long, default_value = "0.0.0.0:9100")]
-    listen_address: String,
+    listen: String,
 }
 
 async fn metrics_handler(State(registry): State<Arc<Registry>>) -> Result<String, String> {
-    let encoder = TextEncoder::new();
-    let metric_families = registry.gather();
-
     let mut buffer = Vec::new();
-    encoder
-        .encode(&metric_families, &mut buffer)
-        .map_err(|e| format!("Failed to encode metrics: {}", e))?;
-
-    String::from_utf8(buffer).map_err(|e| format!("Failed to convert metrics to UTF-8: {}", e))
+    TextEncoder::new()
+        .encode(&registry.gather(), &mut buffer)
+        .map_err(|e| format!("Failed to encode metrics: {e}"))?;
+    String::from_utf8(buffer).map_err(|e| format!("Failed to convert metrics to UTF-8: {e}"))
 }
 
 #[tokio::main]
@@ -51,13 +47,13 @@ async fn main() -> Result<()> {
     let registry = Arc::new(Registry::new());
     let client = Client::builder()
         .gzip(true)
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .context("Failed to create HTTP client")?;
 
-    spawn_pollers(config.targets, registry.clone(), client)?;
+    spawn_pollers(config.targets, &registry, client)?;
 
-    serve_metrics(args.listen_address, registry).await
+    serve_metrics(args.listen, registry).await
 }
 
 fn init_tracing() {
@@ -70,15 +66,11 @@ fn init_tracing() {
         .init();
 }
 
-fn spawn_pollers(
-    targets: Vec<config::Target>,
-    registry: Arc<Registry>,
-    client: Client,
-) -> Result<()> {
+fn spawn_pollers(targets: Vec<config::Target>, registry: &Registry, client: Client) -> Result<()> {
     for target in targets {
-        let target_name = target.name.clone();
-        let poller = poller::Poller::new(target, registry.clone())
-            .with_context(|| format!("Failed to create poller for target '{}'", target_name))?;
+        let name = target.name.clone();
+        let poller = poller::Poller::new(target, registry)
+            .with_context(|| format!("Failed to create poller for target '{name}'"))?;
         let client = client.clone();
 
         tokio::spawn(async move {
@@ -88,29 +80,33 @@ fn spawn_pollers(
     Ok(())
 }
 
-async fn serve_metrics(listen_address: String, registry: Arc<Registry>) -> Result<()> {
+async fn shutdown_signal() {
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+    tokio::select! {
+        _ = signal::ctrl_c() => {}
+        _ = sigterm.recv() => {}
+    }
+    info!("Received shutdown signal");
+}
+
+async fn serve_metrics(listen: String, registry: Arc<Registry>) -> Result<()> {
     let app = Router::new()
         .route("/metrics", get(metrics_handler))
         .route("/health", get(|| async { "OK" }))
         .with_state(registry);
 
-    let listener = tokio::net::TcpListener::bind(&listen_address)
+    let listener = tokio::net::TcpListener::bind(&listen)
         .await
-        .with_context(|| format!("Failed to bind to {}", listen_address))?;
+        .with_context(|| format!("Failed to bind to {listen}"))?;
 
     info!(
         "Serving metrics on http://{}/metrics",
         listener.local_addr()?
     );
 
-    tokio::select! {
-        result = axum::serve(listener, app) => {
-            result.context("Server error")?;
-        }
-        _ = signal::ctrl_c() => {
-            info!("Received shutdown signal");
-        }
-    }
-
-    Ok(())
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("Server error")
 }

@@ -3,283 +3,425 @@ const config = @import("config.zig");
 const metrics = @import("metrics.zig");
 const jq = @import("jq.zig");
 
-pub const Poller = struct {
-    target: config.TargetConfig,
-    registry: *metrics.MetricsRegistry,
-    allocator: std.mem.Allocator,
-    client: std.http.Client,
-    running: std.atomic.Value(bool),
+pub const CompiledMetric = struct {
+    name: []const u8,
+    items_query: jq.Query,
+    value_query: jq.Query,
+    label_queries: []jq.Query,
+    gauge: *metrics.Gauge,
 
-    pub fn init(allocator: std.mem.Allocator, target: config.TargetConfig, registry: *metrics.MetricsRegistry) Poller {
+    pub fn compile(allocator: std.mem.Allocator, registry: *metrics.Registry, mc: config.MetricConfig) !CompiledMetric {
+        var items_query = jq.Query.compile(mc.itemsQuery) catch |err| {
+            config.logError("metric {s}: invalid itemsQuery '{s}'", .{ mc.name, mc.itemsQuery });
+            return err;
+        };
+        errdefer items_query.deinit();
+        var value_query = jq.Query.compile(mc.valueQuery) catch |err| {
+            config.logError("metric {s}: invalid valueQuery '{s}'", .{ mc.name, mc.valueQuery });
+            return err;
+        };
+        errdefer value_query.deinit();
+
+        var label_queries: std.ArrayList(jq.Query) = .empty;
+        errdefer {
+            for (label_queries.items) |*q| q.deinit();
+            label_queries.deinit(allocator);
+        }
+        const label_names = try allocator.alloc([]const u8, mc.labels.len + 1);
+        defer allocator.free(label_names);
+        label_names[0] = "target";
+        for (mc.labels, label_names[1..]) |label, *label_name| {
+            label_name.* = label.name;
+            const q = jq.Query.compile(label.query) catch |err| {
+                config.logError("metric {s}: invalid label query '{s}'", .{ mc.name, label.query });
+                return err;
+            };
+            try label_queries.append(allocator, q);
+        }
+
+        const gauge = try registry.gauge(mc.name, label_names);
         return .{
-            .target = target,
-            .registry = registry,
+            .name = mc.name,
+            .items_query = items_query,
+            .value_query = value_query,
+            .label_queries = try label_queries.toOwnedSlice(allocator),
+            .gauge = gauge,
+        };
+    }
+
+    pub fn deinit(self: *CompiledMetric, allocator: std.mem.Allocator) void {
+        self.items_query.deinit();
+        self.value_query.deinit();
+        for (self.label_queries) |*q| q.deinit();
+        allocator.free(self.label_queries);
+    }
+};
+
+pub fn evaluateMetric(allocator: std.mem.Allocator, target_name: []const u8, cm: *CompiledMetric, root: jq.c.jv) !void {
+    cm.gauge.reset();
+
+    const items = try cm.items_query.exec(allocator, root);
+    defer jq.freeResults(allocator, items);
+
+    for (items) |item| {
+        const values = try cm.value_query.exec(allocator, item);
+        defer jq.freeResults(allocator, values);
+        if (values.len == 0) {
+            std.log.warn("[{s}] metric {s}: valueQuery returned no result, skipping item", .{ target_name, cm.name });
+            continue;
+        }
+        const value = jq.toNumber(values[0]) orelse {
+            const text = try jq.toLabelString(allocator, values[0]);
+            defer allocator.free(text);
+            std.log.warn("[{s}] metric {s}: value is not a number or boolean ({s}: {s}), skipping item", .{ target_name, cm.name, jq.kindName(values[0]), text });
+            continue;
+        };
+
+        const label_values = try allocator.alloc([]const u8, cm.label_queries.len + 1);
+        var owned: usize = 1;
+        defer {
+            for (label_values[1..owned]) |v| allocator.free(v);
+            allocator.free(label_values);
+        }
+        label_values[0] = target_name;
+        for (cm.label_queries, label_values[1..]) |*query, *out| {
+            const results = try query.exec(allocator, item);
+            defer jq.freeResults(allocator, results);
+            out.* = if (results.len > 0)
+                try jq.toLabelString(allocator, results[0])
+            else
+                try allocator.dupe(u8, "");
+            owned += 1;
+        }
+
+        try cm.gauge.set(label_values, value);
+    }
+}
+
+pub fn urlEncode(allocator: std.mem.Allocator, params: []const config.Param) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    for (params, 0..) |param, i| {
+        if (i > 0) try aw.writer.writeByte('&');
+        try writeUrlEncoded(&aw.writer, param.name);
+        try aw.writer.writeByte('=');
+        try writeUrlEncoded(&aw.writer, param.value);
+    }
+    return aw.toOwnedSlice();
+}
+
+fn writeUrlEncoded(w: *std.Io.Writer, s: []const u8) !void {
+    for (s) |byte| switch (byte) {
+        'A'...'Z', 'a'...'z', '0'...'9', '-', '_', '.', '~' => try w.writeByte(byte),
+        else => try w.print("%{X:0>2}", .{byte}),
+    };
+}
+
+pub const Poller = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    target: config.TargetConfig,
+    client: std.http.Client,
+    compiled: []CompiledMetric,
+    extra_headers: []std.http.Header,
+    auth_header: ?[]u8,
+    form_body: ?[]u8,
+    running: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, target: config.TargetConfig, registry: *metrics.Registry) !Poller {
+        var compiled: std.ArrayList(CompiledMetric) = .empty;
+        errdefer {
+            for (compiled.items) |*cm| cm.deinit(allocator);
+            compiled.deinit(allocator);
+        }
+        for (target.metrics) |mc| {
+            try compiled.append(allocator, try CompiledMetric.compile(allocator, registry, mc));
+        }
+
+        const extra_headers = try allocator.alloc(std.http.Header, target.headers.len);
+        errdefer allocator.free(extra_headers);
+        for (target.headers, extra_headers) |header, *out| {
+            out.* = .{ .name = header.name, .value = header.value };
+        }
+
+        const auth_header = if (target.bearerToken) |token|
+            try std.fmt.allocPrint(allocator, "Bearer {s}", .{token})
+        else
+            null;
+        errdefer if (auth_header) |h| allocator.free(h);
+
+        const form_body = if (target.formParams.len > 0)
+            try urlEncode(allocator, target.formParams)
+        else
+            null;
+        errdefer if (form_body) |b| allocator.free(b);
+
+        return .{
             .allocator = allocator,
-            .client = std.http.Client{ .allocator = allocator },
-            .running = std.atomic.Value(bool).init(false),
+            .io = io,
+            .target = target,
+            .client = .{ .allocator = allocator, .io = io },
+            .compiled = try compiled.toOwnedSlice(allocator),
+            .extra_headers = extra_headers,
+            .auth_header = auth_header,
+            .form_body = form_body,
         };
     }
 
     pub fn deinit(self: *Poller) void {
+        self.stop();
         self.client.deinit();
+        for (self.compiled) |*cm| cm.deinit(self.allocator);
+        self.allocator.free(self.compiled);
+        self.allocator.free(self.extra_headers);
+        if (self.auth_header) |h| self.allocator.free(h);
+        if (self.form_body) |b| self.allocator.free(b);
     }
 
     pub fn start(self: *Poller) !void {
-        self.running.store(true, .monotonic);
-        const thread = try std.Thread.spawn(.{}, pollLoop, .{self});
-        thread.detach();
+        self.running.store(true, .release);
+        self.thread = try std.Thread.spawn(.{}, pollLoop, .{self});
     }
 
     pub fn stop(self: *Poller) void {
-        self.running.store(false, .monotonic);
+        self.running.store(false, .release);
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
     }
 
     fn pollLoop(self: *Poller) void {
-        std.log.info("Poll loop started for {s}", .{self.target.name});
-        while (self.running.load(.monotonic)) {
-            std.log.info("Polling {s}...", .{self.target.name});
-            self.poll() catch |err| {
-                std.log.err("Poll error for {s}: {}", .{ self.target.name, err });
-            };
+        while (self.running.load(.acquire)) {
+            self.scrape();
 
-            std.time.sleep(self.target.periodSeconds * std.time.ns_per_s);
-        }
-        std.log.info("Poll loop ended for {s}", .{self.target.name});
-    }
-
-    fn poll(self: *Poller) !void {
-        // Make HTTP request
-        std.log.info("Parsing URI: {s}", .{self.target.uri});
-        const uri = try std.Uri.parse(self.target.uri);
-        
-        std.log.info("Allocating server header buffer", .{});
-        const server_header_buffer = try self.allocator.alloc(u8, 16 * 1024);
-        defer self.allocator.free(server_header_buffer);
-
-        std.log.info("Opening HTTP connection", .{});
-        var req = try self.client.open(.GET, uri, .{
-            .server_header_buffer = server_header_buffer,
-        });
-        defer req.deinit();
-
-        std.log.info("Sending request", .{});
-        try req.send();
-        try req.finish();
-        try req.wait();
-
-        if (req.response.status != .ok) {
-            return error.HttpError;
-        }
-
-        // Read response body
-        const body = try req.reader().readAllAlloc(self.allocator, 1024 * 1024);
-        defer self.allocator.free(body);
-
-        // Process metrics
-        for (self.target.metrics) |metric_config| {
-            try self.processMetric(body, metric_config);
+            var remaining_ms: u64 = @as(u64, self.target.periodSeconds) * 1000;
+            while (remaining_ms > 0 and self.running.load(.acquire)) {
+                const chunk = @min(remaining_ms, 250);
+                self.io.sleep(.fromMilliseconds(@intCast(chunk)), .awake) catch {};
+                remaining_ms -= chunk;
+            }
         }
     }
 
-    pub fn processMetric(self: *Poller, json_data: []const u8, metric_config: config.MetricConfig) !void {
-        var jq_proc = try jq.JqProcessor.init();
-        defer jq_proc.deinit();
-
-        // Get metric value
-        try jq_proc.compile(metric_config.valueQuery);
-        const value_str = try jq_proc.execute(self.allocator, json_data);
-        defer self.allocator.free(value_str);
-
-        const value = try std.fmt.parseFloat(f64, std.mem.trim(u8, value_str, "\" \n"));
-
-        // Get labels
-        var labels = std.ArrayList(metrics.Label).init(self.allocator);
-        defer labels.deinit();
-
-        for (metric_config.labels) |label_config| {
-            var label_proc = try jq.JqProcessor.init();
-            defer label_proc.deinit();
-
-            try label_proc.compile(label_config.query);
-            const label_value_raw = try label_proc.execute(self.allocator, json_data);
-            defer self.allocator.free(label_value_raw);
-
-            // Trim and duplicate the value so it's owned by the label
-            const trimmed = std.mem.trim(u8, label_value_raw, "\" \n");
-            const label_value = try self.allocator.dupe(u8, trimmed);
-
-            try labels.append(.{
-                .name = label_config.name,
-                .value = label_value,
-            });
-        }
-
-        // Update metric in registry
-        const metric = metrics.Metric{
-            .name = metric_config.name,
-            .type = .gauge,
-            .value = value,
-            .labels = try labels.toOwnedSlice(),
-            .help = null,
+    fn scrape(self: *Poller) void {
+        self.scrapeInner() catch |err| {
+            std.log.err("[{s}] scrape failed: {t}", .{ self.target.name, err });
         };
+    }
 
-        try self.registry.updateMetric(metric);
+    fn scrapeInner(self: *Poller) !void {
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+
+        const result = try self.client.fetch(.{
+            .location = .{ .url = self.target.uri },
+            .method = switch (self.target.method) {
+                .GET => .GET,
+                .POST => .POST,
+                .PUT => .PUT,
+                .DELETE => .DELETE,
+            },
+            .payload = self.form_body,
+            .extra_headers = self.extra_headers,
+            .headers = .{
+                .authorization = if (self.auth_header) |h| .{ .override = h } else .default,
+                .content_type = if (self.form_body != null) .{ .override = "application/x-www-form-urlencoded" } else .default,
+            },
+            .response_writer = &aw.writer,
+        });
+        if (result.status.class() != .success) {
+            std.log.err("[{s}] HTTP {d} from {s}, skipping cycle", .{ self.target.name, @intFromEnum(result.status), self.target.uri });
+            return;
+        }
+
+        const root = jq.parseJson(aw.written()) catch {
+            std.log.err("[{s}] response is not valid JSON, skipping cycle", .{self.target.name});
+            return;
+        };
+        defer jq.c.jv_free(root);
+
+        for (self.compiled) |*cm| {
+            try evaluateMetric(self.allocator, self.target.name, cm, root);
+        }
     }
 };
 
-test "Poller - processMetric with simple value" {
-    var registry = metrics.MetricsRegistry.init(std.testing.allocator);
-    defer registry.deinit();
+const TestContext = struct {
+    registry: metrics.Registry,
+    compiled: CompiledMetric,
 
-    const target = config.TargetConfig{
-        .name = "test",
-        .uri = "http://example.com",
-        .method = "GET",
-        .periodSeconds = 60,
-        .metrics = &[_]config.MetricConfig{},
-    };
+    fn init(mc: config.MetricConfig) !TestContext {
+        var ctx: TestContext = .{
+            .registry = metrics.Registry.init(std.testing.allocator, std.testing.io),
+            .compiled = undefined,
+        };
+        errdefer ctx.registry.deinit();
+        ctx.compiled = try CompiledMetric.compile(std.testing.allocator, &ctx.registry, mc);
+        return ctx;
+    }
 
-    var poller = Poller.init(std.testing.allocator, target, &registry);
-    defer poller.deinit();
+    fn evaluate(self: *TestContext, json: []const u8) !void {
+        const root = try jq.parseJson(json);
+        defer jq.c.jv_free(root);
+        try evaluateMetric(std.testing.allocator, "test-target", &self.compiled, root);
+    }
 
-    const json_data = 
-        \\{"temperature": 25.5, "humidity": 60}
-    ;
+    fn render(self: *TestContext) ![]u8 {
+        var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer aw.deinit();
+        try self.registry.render(&aw.writer);
+        return aw.toOwnedSlice();
+    }
 
-    const metric_config = config.MetricConfig{
-        .name = "room_temperature",
-        .valueQuery = ".temperature",
-        .labels = &[_]config.LabelConfig{},
-    };
+    fn deinit(self: *TestContext) void {
+        self.compiled.deinit(std.testing.allocator);
+        self.registry.deinit();
+    }
+};
 
-    try poller.processMetric(json_data, metric_config);
-    
-    try std.testing.expectEqual(@as(usize, 1), registry.metrics.count());
+test "single item with labels, target label first" {
+    var ctx = try TestContext.init(.{
+        .name = "evo_percentage",
+        .valueQuery = ".percentageUsed",
+        .labels = &.{
+            .{ .name = "name", .query = ".name" },
+            .{ .name = "max_capacity", .query = ".max_capacity" },
+        },
+    });
+    defer ctx.deinit();
+
+    try ctx.evaluate(
+        \\{"percentageUsed": 42.5, "name": "Enge", "max_capacity": 80}
+    );
+
+    const out = try ctx.render();
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        \\evo_percentage{target="test-target",name="Enge",max_capacity="80"} 42.5
+    ) != null);
 }
 
-test "Poller - processMetric with labels" {
-    var registry = metrics.MetricsRegistry.init(std.testing.allocator);
-    defer registry.deinit();
+test "itemsQuery iterates multiple results" {
+    var ctx = try TestContext.init(.{
+        .name = "river_temp",
+        .itemsQuery = ".payload[]",
+        .valueQuery = ".val",
+        .labels = &.{.{ .name = "station", .query = ".loc" }},
+    });
+    defer ctx.deinit();
 
-    const target = config.TargetConfig{
-        .name = "test",
-        .uri = "http://example.com",
-        .method = "GET",
-        .periodSeconds = 60,
-        .metrics = &[_]config.MetricConfig{},
-    };
+    try ctx.evaluate(
+        \\{"payload": [{"val": 10.5, "loc": "2243"}, {"val": 11.25, "loc": "2244"}]}
+    );
 
-    var poller = Poller.init(std.testing.allocator, target, &registry);
-    defer poller.deinit();
-
-    const json_data = 
-        \\{"sensor": {"location": "living_room", "type": "temp", "value": 22.3}}
-    ;
-
-    var label_configs = [_]config.LabelConfig{
-        .{ .name = "location", .query = ".sensor.location" },
-        .{ .name = "type", .query = ".sensor.type" },
-    };
-
-    const metric_config = config.MetricConfig{
-        .name = "sensor_reading",
-        .valueQuery = ".sensor.value",
-        .labels = label_configs[0..],
-    };
-
-    try poller.processMetric(json_data, metric_config);
-    
-    try std.testing.expectEqual(@as(usize, 1), registry.metrics.count());
+    const out = try ctx.render();
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        \\river_temp{target="test-target",station="2243"} 10.5
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out,
+        \\river_temp{target="test-target",station="2244"} 11.25
+    ) != null);
 }
 
-test "Poller - init and deinit" {
-    var registry = metrics.MetricsRegistry.init(std.testing.allocator);
-    defer registry.deinit();
+test "non-numeric values skip the item, booleans convert" {
+    var ctx = try TestContext.init(.{
+        .name = "m",
+        .itemsQuery = ".[]",
+        .valueQuery = ".v",
+        .labels = &.{.{ .name = "id", .query = ".id" }},
+    });
+    defer ctx.deinit();
 
-    const target = config.TargetConfig{
-        .name = "test-target",
-        .uri = "http://localhost:8080/metrics",
-        .method = "GET",
-        .periodSeconds = 30,
-        .metrics = &[_]config.MetricConfig{},
-    };
+    try ctx.evaluate(
+        \\[
+        \\  {"id": "num", "v": 7},
+        \\  {"id": "yes", "v": true},
+        \\  {"id": "no", "v": false},
+        \\  {"id": "null", "v": null},
+        \\  {"id": "str", "v": "nope"},
+        \\  {"id": "missing"}
+        \\]
+    );
 
-    var poller = Poller.init(std.testing.allocator, target, &registry);
-    defer poller.deinit();
-
-    try std.testing.expectEqual(false, poller.running.load(.monotonic));
-    try std.testing.expectEqualStrings("test-target", poller.target.name);
+    const out = try ctx.render();
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "m{target=\"test-target\",id=\"num\"} 7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "m{target=\"test-target\",id=\"yes\"} 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "m{target=\"test-target\",id=\"no\"} 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "id=\"null\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "id=\"str\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "id=\"missing\"") == null);
 }
 
-test "Poller - processMetric with array data" {
-    var registry = metrics.MetricsRegistry.init(std.testing.allocator);
-    defer registry.deinit();
+test "missing label result becomes empty string" {
+    var ctx = try TestContext.init(.{
+        .name = "m",
+        .valueQuery = ".v",
+        .labels = &.{.{ .name = "gone", .query = ".does | select(. != null)" }},
+    });
+    defer ctx.deinit();
 
-    const target = config.TargetConfig{
-        .name = "test",
-        .uri = "http://example.com",
-        .method = "GET",
-        .periodSeconds = 60,
-        .metrics = &[_]config.MetricConfig{},
-    };
+    try ctx.evaluate("{\"v\": 1}");
 
-    var poller = Poller.init(std.testing.allocator, target, &registry);
-    defer poller.deinit();
-
-    const json_data = 
-        \\{"metrics": [{"name": "cpu", "value": 45.2}, {"name": "memory", "value": 78.9}]}
-    ;
-
-    const metric_config = config.MetricConfig{
-        .name = "system_metric",
-        .valueQuery = ".metrics[0].value",
-        .labels = &[_]config.LabelConfig{},
-    };
-
-    try poller.processMetric(json_data, metric_config);
-    
-    try std.testing.expectEqual(@as(usize, 1), registry.metrics.count());
+    const out = try ctx.render();
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "m{target=\"test-target\",gone=\"\"} 1") != null);
 }
 
-test "Poller - processMetric with nested labels" {
-    var registry = metrics.MetricsRegistry.init(std.testing.allocator);
+test "re-scrape replaces previous series" {
+    var ctx = try TestContext.init(.{
+        .name = "m",
+        .itemsQuery = ".[]",
+        .valueQuery = ".v",
+        .labels = &.{.{ .name = "id", .query = ".id" }},
+    });
+    defer ctx.deinit();
+
+    try ctx.evaluate(
+        \\[{"id": "a", "v": 1}, {"id": "b", "v": 2}]
+    );
+    try ctx.evaluate(
+        \\[{"id": "b", "v": 3}]
+    );
+
+    const out = try ctx.render();
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "id=\"a\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "m{target=\"test-target\",id=\"b\"} 3") != null);
+    try std.testing.expectEqual(@as(usize, 1), ctx.compiled.gauge.series.items.len);
+}
+
+test "default itemsQuery uses root" {
+    var ctx = try TestContext.init(.{
+        .name = "m",
+        .valueQuery = ".count",
+    });
+    defer ctx.deinit();
+
+    try ctx.evaluate("{\"count\": 9}");
+
+    const out = try ctx.render();
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "m{target=\"test-target\"} 9") != null);
+}
+
+test "compile fails fast on bad query" {
+    var registry = metrics.Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
+    try std.testing.expectError(error.CompileError, CompiledMetric.compile(std.testing.allocator, &registry, .{
+        .name = "m",
+        .valueQuery = ".[",
+    }));
+}
 
-    const target = config.TargetConfig{
-        .name = "test",
-        .uri = "http://example.com",
-        .method = "GET",
-        .periodSeconds = 60,
-        .metrics = &[_]config.MetricConfig{},
-    };
-
-    var poller = Poller.init(std.testing.allocator, target, &registry);
-    defer poller.deinit();
-
-    const json_data = 
-        \\{
-        \\  "server": {
-        \\    "name": "web-01",
-        \\    "datacenter": "us-east",
-        \\    "stats": {
-        \\      "requests_per_second": 1523.7
-        \\    }
-        \\  }
-        \\}
-    ;
-
-    var label_configs = [_]config.LabelConfig{
-        .{ .name = "server", .query = ".server.name" },
-        .{ .name = "dc", .query = ".server.datacenter" },
-    };
-
-    const metric_config = config.MetricConfig{
-        .name = "http_rps",
-        .valueQuery = ".server.stats.requests_per_second",
-        .labels = label_configs[0..],
-    };
-
-    try poller.processMetric(json_data, metric_config);
-    
-    try std.testing.expectEqual(@as(usize, 1), registry.metrics.count());
+test "urlEncode" {
+    const encoded = try urlEncode(std.testing.allocator, &.{
+        .{ .name = "grant_type", .value = "client credentials" },
+        .{ .name = "scope", .value = "a&b=c" },
+    });
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualStrings("grant_type=client%20credentials&scope=a%26b%3Dc", encoded);
 }

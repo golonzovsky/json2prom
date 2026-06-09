@@ -3,100 +3,136 @@ const config = @import("config.zig");
 const metrics = @import("metrics.zig");
 const poller = @import("poller.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+const default_listen = "0.0.0.0:9102";
 
-    // Parse command line arguments
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub const std_options: std.Options = .{ .log_level = .info };
 
-    if (args.len < 2) {
-        std.log.err("Usage: {s} <config.yaml>", .{args[0]});
-        return;
-    }
+var shutdown_requested: std.atomic.Value(bool) = .init(false);
 
-    // Load configuration
-    var cfg = try config.loadConfig(allocator, args[1]);
-    defer cfg.deinit();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
 
-    // Initialize metrics registry
-    var registry = metrics.MetricsRegistry.init(allocator);
-    defer registry.deinit();
+    var config_path: ?[]const u8 = null;
+    var listen_addr: []const u8 = default_listen;
 
-    // Start pollers
-    var pollers = std.ArrayList(*poller.Poller).init(allocator);
-    defer {
-        for (pollers.items) |p| {
-            p.stop();
-            p.deinit();
-            allocator.destroy(p);
+    var args = init.minimal.args.iterate();
+    const argv0 = args.next() orelse "json2prom";
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--config")) {
+            config_path = args.next() orelse return usage(argv0);
+        } else if (std.mem.eql(u8, arg, "--listen")) {
+            listen_addr = args.next() orelse return usage(argv0);
+        } else {
+            return usage(argv0);
         }
-        pollers.deinit();
     }
+    const path = config_path orelse return usage(argv0);
 
+    var cfg = try config.load(gpa, io, path);
+    defer cfg.deinit();
+    try config.resolveBearerTokens(cfg.targets, init.environ_map);
+
+    var registry = metrics.Registry.init(gpa, io);
+
+    var pollers: std.ArrayList(*poller.Poller) = .empty;
     for (cfg.targets) |target| {
-        std.log.info("Starting poller for target: {s}", .{target.name});
-        const p = try allocator.create(poller.Poller);
-        p.* = poller.Poller.init(allocator, target, &registry);
+        const p = try gpa.create(poller.Poller);
+        p.* = try poller.Poller.init(gpa, io, target, &registry);
+        try pollers.append(gpa, p);
+    }
+
+    const address = std.Io.net.IpAddress.parseLiteral(listen_addr) catch {
+        std.log.err("invalid listen address: {s}", .{listen_addr});
+        return error.InvalidListenAddress;
+    };
+    var server = address.listen(io, .{ .reuse_address = true }) catch |err| {
+        std.log.err("cannot listen on {s}: {t}", .{ listen_addr, err });
+        return err;
+    };
+
+    for (pollers.items) |p| {
+        std.log.info("starting poller for target {s} (every {d}s)", .{ p.target.name, p.target.periodSeconds });
         try p.start();
-        try pollers.append(p);
     }
 
-    // Start HTTP server for Prometheus scraping
-    const server_thread = try std.Thread.spawn(.{}, runMetricsServer, .{ &registry, allocator });
-    defer server_thread.join();
+    const server_thread = try std.Thread.spawn(.{}, serve, .{ &server, io, &registry, gpa });
+    server_thread.detach();
+    std.log.info("listening on {s}", .{listen_addr});
 
-    // Keep running
-    std.log.info("Prometheus JSON proxy started. Press Ctrl+C to stop.", .{});
-
-    // Handle shutdown signal
-    _ = std.posix.sigaction(std.posix.SIG.TERM, &.{
-        .handler = .{ .handler = handleSignal },
-        .mask = std.posix.empty_sigset,
-        .flags = 0,
-    }, null);
-
-    // Wait forever
-    while (true) {
-        std.time.sleep(std.time.ns_per_s);
+    installSignalHandlers();
+    while (!shutdown_requested.load(.acquire)) {
+        io.sleep(.fromMilliseconds(200), .awake) catch {};
     }
-}
 
-fn handleSignal(sig: c_int) callconv(.C) void {
-    _ = sig;
+    std.log.info("shutting down", .{});
+    for (pollers.items) |p| p.stop();
     std.process.exit(0);
 }
 
-fn runMetricsServer(registry: *metrics.MetricsRegistry, allocator: std.mem.Allocator) !void {
-    const address = try std.net.Address.parseIp("0.0.0.0", 9090);
-    var server = try address.listen(.{});
-    defer server.deinit();
+fn usage(argv0: []const u8) error{InvalidUsage} {
+    std.log.err("usage: {s} --config <config.yaml> [--listen <addr>] (default {s})", .{ argv0, default_listen });
+    return error.InvalidUsage;
+}
 
-    std.log.info("Metrics server listening on :9090/metrics", .{});
+fn installSignalHandlers() void {
+    const action: std.posix.Sigaction = .{
+        .handler = .{ .handler = onSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.INT, &action, null);
+    std.posix.sigaction(.TERM, &action, null);
+}
 
+fn onSignal(_: std.posix.SIG) callconv(.c) void {
+    shutdown_requested.store(true, .release);
+}
+
+fn serve(server: *std.Io.net.Server, io: std.Io, registry: *metrics.Registry, gpa: std.mem.Allocator) void {
     while (true) {
-        const conn = try server.accept();
-        const thread = try std.Thread.spawn(.{}, handleMetricsRequest, .{ conn, registry, allocator });
+        const stream = server.accept(io) catch |err| {
+            std.log.err("accept failed: {t}", .{err});
+            return;
+        };
+        const thread = std.Thread.spawn(.{}, handleConnection, .{ stream, io, registry, gpa }) catch {
+            stream.close(io);
+            continue;
+        };
         thread.detach();
     }
 }
 
-fn handleMetricsRequest(conn: std.net.Server.Connection, registry: *metrics.MetricsRegistry, allocator: std.mem.Allocator) !void {
-    defer conn.stream.close();
+fn handleConnection(stream: std.Io.net.Stream, io: std.Io, registry: *metrics.Registry, gpa: std.mem.Allocator) void {
+    defer stream.close(io);
 
-    var buffer: [4096]u8 = undefined;
-    _ = try conn.stream.read(&buffer);
+    var recv_buffer: [8192]u8 = undefined;
+    var send_buffer: [8192]u8 = undefined;
+    var reader = stream.reader(io, &recv_buffer);
+    var writer = stream.writer(io, &send_buffer);
+    var server = std.http.Server.init(&reader.interface, &writer.interface);
 
-    // Simple HTTP response
-    const response_header = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n";
-    _ = try conn.stream.write(response_header);
+    while (true) {
+        var request = server.receiveHead() catch return;
+        const keep_alive = request.head.keep_alive;
+        handleRequest(&request, registry, gpa) catch return;
+        if (!keep_alive) return;
+    }
+}
 
-    // Export metrics
-    var metrics_buffer = std.ArrayList(u8).init(allocator);
-    defer metrics_buffer.deinit();
-
-    try registry.exportPrometheus(metrics_buffer.writer());
-    _ = try conn.stream.write(metrics_buffer.items);
+fn handleRequest(request: *std.http.Server.Request, registry: *metrics.Registry, gpa: std.mem.Allocator) !void {
+    if (request.head.method == .GET and std.mem.eql(u8, request.head.target, "/metrics")) {
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        try registry.render(&aw.writer);
+        try request.respond(aw.written(), .{
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain; version=0.0.4; charset=utf-8" }},
+        });
+    } else if (request.head.method == .GET and std.mem.eql(u8, request.head.target, "/health")) {
+        try request.respond("OK", .{
+            .extra_headers = &.{.{ .name = "content-type", .value = "text/plain" }},
+        });
+    } else {
+        try request.respond("Not Found", .{ .status = .not_found });
+    }
 }

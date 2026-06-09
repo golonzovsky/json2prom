@@ -1,169 +1,199 @@
 const std = @import("std");
-const c = @cImport({
+
+pub const c = @cImport({
     @cInclude("jq.h");
 });
 
-pub const JqError = error{
+pub const Error = error{
     CompileError,
-    ExecuteError,
     InvalidJson,
+    OutOfMemory,
 };
 
-pub const JqProcessor = struct {
-    state: ?*c.jq_state,
+pub const Query = struct {
+    state: *c.jq_state,
 
-    pub fn init() !JqProcessor {
+    pub fn compile(program: []const u8) Error!Query {
         const state = c.jq_init() orelse return error.OutOfMemory;
-        return JqProcessor{ .state = state };
+        var owned: ?*c.jq_state = state;
+        errdefer c.jq_teardown(&owned);
+
+        const programz = std.heap.c_allocator.dupeZ(u8, program) catch return error.OutOfMemory;
+        defer std.heap.c_allocator.free(programz);
+
+        if (c.jq_compile(state, programz) == 0) return error.CompileError;
+        return .{ .state = state };
     }
 
-    pub fn deinit(self: *JqProcessor) void {
-        c.jq_teardown(&self.state);
-        self.state = null;
+    pub fn deinit(self: *Query) void {
+        var state: ?*c.jq_state = self.state;
+        c.jq_teardown(&state);
+        self.* = undefined;
     }
 
-    pub fn compile(self: *JqProcessor, program: []const u8) !void {
-        const c_program = try std.fmt.allocPrintZ(std.heap.c_allocator, "{s}", .{program});
-        defer std.heap.c_allocator.free(c_program);
-
-        if (c.jq_compile(self.state.?, c_program) == 0) {
-            return JqError.CompileError;
+    /// Returns every value the program emits for `input`. The caller keeps
+    /// ownership of `input` and owns each returned jv plus the slice.
+    pub fn exec(self: *Query, allocator: std.mem.Allocator, input: c.jv) ![]c.jv {
+        var results: std.ArrayList(c.jv) = .empty;
+        errdefer {
+            for (results.items) |v| c.jv_free(v);
+            results.deinit(allocator);
         }
-    }
 
-    pub fn execute(self: *JqProcessor, allocator: std.mem.Allocator, json_input: []const u8) ![]const u8 {
-        const c_input = try std.fmt.allocPrintZ(std.heap.c_allocator, "{s}", .{json_input});
-        defer std.heap.c_allocator.free(c_input);
-
-        const parsed = c.jv_parse(c_input);
-        if (c.jv_get_kind(parsed) == c.JV_KIND_INVALID) {
-            c.jv_free(parsed);
-            return JqError.InvalidJson;
-        }
-        defer c.jv_free(parsed);
-
-        c.jq_start(self.state.?, parsed, 0);
-
-        var results = std.ArrayList(u8).init(allocator);
-        defer results.deinit();
-
+        c.jq_start(self.state, c.jv_copy(input), 0);
         while (true) {
-            const result = c.jq_next(self.state.?);
-            if (c.jv_get_kind(result) == c.JV_KIND_INVALID) {
-                c.jv_free(result);
+            const v = c.jq_next(self.state);
+            if (c.jv_is_valid(v) == 0) {
+                c.jv_free(v);
                 break;
             }
-
-            const dumped = c.jv_dump_string(result, 0);
-            const str = c.jv_string_value(dumped);
-            try results.appendSlice(std.mem.span(str));
-
-            c.jv_free(result);
-            c.jv_free(dumped);
+            try results.append(allocator, v);
         }
-
-        return results.toOwnedSlice();
+        return results.toOwnedSlice(allocator);
     }
 };
 
-test "JqProcessor - simple value extraction" {
-    var processor = try JqProcessor.init();
-    defer processor.deinit();
+pub fn freeResults(allocator: std.mem.Allocator, results: []c.jv) void {
+    for (results) |v| c.jv_free(v);
+    allocator.free(results);
+}
 
-    try processor.compile(".name");
-    
-    const json = 
+pub fn parseJson(input: []const u8) Error!c.jv {
+    const v = c.jv_parse_sized(input.ptr, @intCast(input.len));
+    if (c.jv_is_valid(v) == 0) {
+        c.jv_free(v);
+        return error.InvalidJson;
+    }
+    return v;
+}
+
+/// Numbers as-is, booleans as 1/0, anything else null (caller skips the item).
+pub fn toNumber(v: c.jv) ?f64 {
+    return switch (c.jv_get_kind(v)) {
+        c.JV_KIND_NUMBER => c.jv_number_value(v),
+        c.JV_KIND_TRUE => 1,
+        c.JV_KIND_FALSE => 0,
+        else => null,
+    };
+}
+
+/// Strings raw (no quotes), other kinds as their JSON text. Caller owns result.
+pub fn toLabelString(allocator: std.mem.Allocator, v: c.jv) ![]u8 {
+    if (c.jv_get_kind(v) == c.JV_KIND_STRING) {
+        const len: usize = @intCast(c.jv_string_length_bytes(c.jv_copy(v)));
+        return allocator.dupe(u8, c.jv_string_value(v)[0..len]);
+    }
+    const dumped = c.jv_dump_string(c.jv_copy(v), 0);
+    defer c.jv_free(dumped);
+    return allocator.dupe(u8, std.mem.span(c.jv_string_value(dumped)));
+}
+
+pub fn kindName(v: c.jv) []const u8 {
+    return std.mem.span(c.jv_kind_name(c.jv_get_kind(v)));
+}
+
+test "compile error fails fast" {
+    try std.testing.expectError(error.CompileError, Query.compile(".["));
+}
+
+test "single result" {
+    var q = try Query.compile(".value");
+    defer q.deinit();
+
+    const root = try parseJson(
         \\{"name": "test", "value": 42}
-    ;
-    
-    const result = try processor.execute(std.testing.allocator, json);
-    defer std.testing.allocator.free(result);
-    
-    try std.testing.expectEqualStrings("\"test\"", result);
+    );
+    defer c.jv_free(root);
+
+    const results = try q.exec(std.testing.allocator, root);
+    defer freeResults(std.testing.allocator, results);
+
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqual(@as(f64, 42), toNumber(results[0]).?);
 }
 
-test "JqProcessor - number extraction" {
-    var processor = try JqProcessor.init();
-    defer processor.deinit();
+test "multiple results from stream" {
+    var q = try Query.compile(".payload[]");
+    defer q.deinit();
 
-    try processor.compile(".value");
-    
-    const json = 
-        \\{"name": "test", "value": 42}
-    ;
-    
-    const result = try processor.execute(std.testing.allocator, json);
-    defer std.testing.allocator.free(result);
-    
-    try std.testing.expectEqualStrings("42", result);
+    const root = try parseJson(
+        \\{"payload": [{"val": 1}, {"val": 2}, {"val": 3}]}
+    );
+    defer c.jv_free(root);
+
+    const results = try q.exec(std.testing.allocator, root);
+    defer freeResults(std.testing.allocator, results);
+
+    try std.testing.expectEqual(@as(usize, 3), results.len);
+    for (results, 1..) |item, i| {
+        var vq = try Query.compile(".val");
+        defer vq.deinit();
+        const vals = try vq.exec(std.testing.allocator, item);
+        defer freeResults(std.testing.allocator, vals);
+        try std.testing.expectEqual(@as(f64, @floatFromInt(i)), toNumber(vals[0]).?);
+    }
 }
 
-test "JqProcessor - nested value extraction" {
-    var processor = try JqProcessor.init();
-    defer processor.deinit();
+test "no result" {
+    var q = try Query.compile(".[] | select(.x > 100)");
+    defer q.deinit();
 
-    try processor.compile(".data.nested.value");
-    
-    const json = 
-        \\{"data": {"nested": {"value": "deep"}}}
-    ;
-    
-    const result = try processor.execute(std.testing.allocator, json);
-    defer std.testing.allocator.free(result);
-    
-    try std.testing.expectEqualStrings("\"deep\"", result);
+    const root = try parseJson("[{\"x\": 1}]");
+    defer c.jv_free(root);
+
+    const results = try q.exec(std.testing.allocator, root);
+    defer freeResults(std.testing.allocator, results);
+    try std.testing.expectEqual(@as(usize, 0), results.len);
 }
 
-test "JqProcessor - array access" {
-    var processor = try JqProcessor.init();
-    defer processor.deinit();
-
-    try processor.compile(".[1]");
-    
-    const json = 
-        \\[10, 20, 30]
-    ;
-    
-    const result = try processor.execute(std.testing.allocator, json);
-    defer std.testing.allocator.free(result);
-    
-    try std.testing.expectEqualStrings("20", result);
+test "value conversion rules" {
+    const cases = [_]struct { json: []const u8, expected: ?f64 }{
+        .{ .json = "42.5", .expected = 42.5 },
+        .{ .json = "true", .expected = 1 },
+        .{ .json = "false", .expected = 0 },
+        .{ .json = "null", .expected = null },
+        .{ .json = "\"str\"", .expected = null },
+        .{ .json = "[1]", .expected = null },
+        .{ .json = "{\"a\": 1}", .expected = null },
+    };
+    for (cases) |case| {
+        const v = try parseJson(case.json);
+        defer c.jv_free(v);
+        try std.testing.expectEqual(case.expected, toNumber(v));
+    }
 }
 
-test "JqProcessor - invalid JSON" {
-    var processor = try JqProcessor.init();
-    defer processor.deinit();
-
-    try processor.compile(".value");
-    
-    const invalid_json = 
-        \\{invalid json}
-    ;
-    
-    const result = processor.execute(std.testing.allocator, invalid_json);
-    try std.testing.expectError(JqError.InvalidJson, result);
+test "label string conversion" {
+    const cases = [_]struct { json: []const u8, expected: []const u8 }{
+        .{ .json = "\"Limmat\"", .expected = "Limmat" },
+        .{ .json = "42", .expected = "42" },
+        .{ .json = "42.5", .expected = "42.5" },
+        .{ .json = "true", .expected = "true" },
+        .{ .json = "null", .expected = "null" },
+        .{ .json = "[1,2]", .expected = "[1,2]" },
+    };
+    for (cases) |case| {
+        const v = try parseJson(case.json);
+        defer c.jv_free(v);
+        const s = try toLabelString(std.testing.allocator, v);
+        defer std.testing.allocator.free(s);
+        try std.testing.expectEqualStrings(case.expected, s);
+    }
 }
 
-test "JqProcessor - compile error" {
-    var processor = try JqProcessor.init();
-    defer processor.deinit();
-
-    const result = processor.compile(".[");
-    try std.testing.expectError(JqError.CompileError, result);
+test "invalid JSON" {
+    try std.testing.expectError(error.InvalidJson, parseJson("{invalid json}"));
 }
 
-test "JqProcessor - empty result" {
-    var processor = try JqProcessor.init();
-    defer processor.deinit();
+test "query is reusable across inputs" {
+    var q = try Query.compile(".n");
+    defer q.deinit();
 
-    try processor.compile(".nonexistent");
-    
-    const json = 
-        \\{"name": "test"}
-    ;
-    
-    const result = try processor.execute(std.testing.allocator, json);
-    defer std.testing.allocator.free(result);
-    
-    try std.testing.expectEqualStrings("null", result);
+    for ([_][]const u8{ "{\"n\": 1}", "{\"n\": 2}" }, 1..) |json, i| {
+        const root = try parseJson(json);
+        defer c.jv_free(root);
+        const results = try q.exec(std.testing.allocator, root);
+        defer freeResults(std.testing.allocator, results);
+        try std.testing.expectEqual(@as(f64, @floatFromInt(i)), toNumber(results[0]).?);
+    }
 }

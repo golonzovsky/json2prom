@@ -18,3 +18,16 @@ targets:
             query: .name
           - name: max_capacity
             query: .max_capacity
+  - name: limmat-water-temp
+    uri: https://api.existenz.ch/apiv1/hydro/latest?app=grafana-to-go&locations=2243&parameters=temperature
+    method: GET
+    periodSeconds: 300
+    metrics:
+      - name: river_water_temperature_celsius
+        itemsQuery: .payload[]
+        valueQuery: .val
+        labels:
+          - name: location
+            query: "\"Limmat-Baden\""
+          - name: station_id
+            query: .loc

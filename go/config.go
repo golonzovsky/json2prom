@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"net/http"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -44,5 +46,33 @@ func LoadConfig(path string) (*Config, error) {
 	if err := yaml.Unmarshal(raw, &cfg); err != nil {
 		return nil, err
 	}
+	for i := range cfg.Targets {
+		if err := cfg.Targets[i].normalize(); err != nil {
+			return nil, err
+		}
+	}
 	return &cfg, nil
+}
+
+func (t *Target) normalize() error {
+	if t.Method == "" {
+		t.Method = http.MethodGet
+	}
+	switch t.Method {
+	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete:
+	default:
+		return fmt.Errorf("target %s: unsupported method %q", t.Name, t.Method)
+	}
+	if t.PeriodSeconds <= 0 {
+		return fmt.Errorf("target %s: periodSeconds must be > 0", t.Name)
+	}
+	if t.UseBearerTokenFrom != "" && os.Getenv(t.UseBearerTokenFrom) == "" {
+		return fmt.Errorf("target %s: bearer token env var %s is not set", t.Name, t.UseBearerTokenFrom)
+	}
+	for i := range t.Metrics {
+		if t.Metrics[i].ItemsQuery == "" {
+			t.Metrics[i].ItemsQuery = "."
+		}
+	}
+	return nil
 }

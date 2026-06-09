@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   json2prom:
     build:
@@ -24,6 +22,19 @@ services:
       - "9101:9101"
     volumes:
       - ./go/evo.yaml:/etc/json2prom/config.yaml:ro
+    networks:
+      - monitoring
+
+  json2prom-zig:
+    build:
+      context: ./zig
+      dockerfile: Dockerfile
+    container_name: json2prom-zig
+    restart: unless-stopped
+    ports:
+      - "9102:9102"
+    volumes:
+      - ./zig/evo.yaml:/etc/json2prom/config.yaml:ro
     networks:
       - monitoring
 

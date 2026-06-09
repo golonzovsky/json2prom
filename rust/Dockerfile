@@ -1,33 +1,22 @@
-FROM rust:1.86-slim as builder
+FROM rust:1.94-slim AS builder
 
 WORKDIR /usr/src/app
 COPY . .
 
-# Install build dependencies
-RUN apt-get update && \
-  apt-get install -y pkg-config libssl-dev && \
-  apt-get clean && \
-  rm -rf /var/lib/apt/lists/*
-
-# Build the application in release mode
 RUN cargo build --release
 
-# Create a minimal runtime image
-FROM debian:bookworm-slim
+# Create a minimal runtime image (trixie to match the glibc of rust:1.94-slim)
+FROM debian:trixie-slim
 
-# Install runtime dependencies
 RUN apt-get update && \
-  apt-get install -y ca-certificates libssl3 && \
+  apt-get install -y ca-certificates && \
   apt-get clean && \
   rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy the binary from the builder stage
 COPY --from=builder /usr/src/app/target/release/json2prom /app/json2prom
 
-# Set the entrypoint
 ENTRYPOINT ["/app/json2prom", "--config", "/etc/json2prom/config.yaml"]
 
-# Expose Prometheus metrics port
 EXPOSE 9100

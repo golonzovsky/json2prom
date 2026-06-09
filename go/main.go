@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 )
@@ -43,19 +44,24 @@ func createRootCmd() *cobra.Command {
 			}
 
 			for _, tgt := range cfg.Targets {
-				p, err := NewPoller(tgt, logger)
+				p, err := NewPoller(tgt, prometheus.DefaultRegisterer, logger)
 				if err != nil {
 					return err
 				}
 				go p.Run(ctx)
 			}
 
-			// expose Prometheus metrics
+			mux := http.NewServeMux()
+			mux.Handle("GET /metrics", promhttp.Handler())
+			mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
+				w.Write([]byte("OK"))
+			})
+
 			srv := &http.Server{
 				Addr:         listenAddr,
 				ReadTimeout:  5 * time.Second,
 				WriteTimeout: 10 * time.Second,
-				Handler:      promhttp.Handler(),
+				Handler:      mux,
 			}
 			go func() {
 				logger.Info("serving metrics", "addr", listenAddr)

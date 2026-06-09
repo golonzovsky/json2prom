@@ -18,6 +18,6 @@ scrape_configs:
 
   - job_name: "json2prom"
     static_configs:
-      - targets: ["json2prom:9100"]
+      - targets: ["json2prom:9100", "json2prom-go:9101", "json2prom-zig:9102"]
     metrics_path: "/metrics"
     scrape_interval: 30s
