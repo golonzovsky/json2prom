@@ -31,16 +31,14 @@ pub fn main(init: std.process.Init) !void {
     defer cfg.deinit();
     config.resolveBearerTokens(cfg.targets, init.environ_map) catch std.process.exit(1);
 
-    var registry = metrics.Registry.init(gpa, io);
+    var registry: metrics.Registry = .init(gpa, io);
 
-    var pollers: std.ArrayList(*poller.Poller) = .empty;
-    for (cfg.targets) |target| {
-        const p = try gpa.create(poller.Poller);
+    const pollers = try gpa.alloc(poller.Poller, cfg.targets.len);
+    for (cfg.targets, pollers) |target, *p| {
         p.* = poller.Poller.init(gpa, io, target, &registry) catch |err| switch (err) {
             error.CompileError => std.process.exit(1),
             else => return err,
         };
-        try pollers.append(gpa, p);
     }
 
     const address = std.Io.net.IpAddress.parseLiteral(listen_addr) catch {
@@ -52,8 +50,8 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
-    for (pollers.items) |p| {
-        std.log.info("starting poller for target {s} (every {d}s)", .{ p.target.name, p.target.periodSeconds });
+    for (pollers) |*p| {
+        std.log.info("starting poller for target {s} (every {d}s)", .{ p.target.name, p.target.period_seconds });
         try p.start();
     }
 
@@ -67,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.log.info("shutting down", .{});
-    for (pollers.items) |p| p.stop();
+    for (pollers) |*p| p.stop();
     std.process.exit(0);
 }
 

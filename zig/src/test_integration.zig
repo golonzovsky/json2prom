@@ -12,7 +12,7 @@ const Pipeline = struct {
     fn init(source: []const u8) !Pipeline {
         var pipeline: Pipeline = .{
             .cfg = try config.parse(std.testing.allocator, source),
-            .registry = metrics.Registry.init(std.testing.allocator, std.testing.io),
+            .registry = .init(std.testing.allocator, std.testing.io),
             .compiled = .empty,
         };
         errdefer pipeline.deinit();
@@ -34,17 +34,14 @@ const Pipeline = struct {
 
     fn evaluateAll(self: *Pipeline, target_name: []const u8, json: []const u8) !void {
         const root = try jq.parseJson(json);
-        defer jq.c.jv_free(root);
+        defer jq.free(root);
         for (self.compiled.items) |*cm| {
             try poller.evaluateMetric(std.testing.allocator, target_name, cm, root);
         }
     }
 
     fn render(self: *Pipeline) ![]u8 {
-        var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
-        defer aw.deinit();
-        try self.registry.render(&aw.writer);
-        return aw.toOwnedSlice();
+        return self.registry.renderAlloc(std.testing.allocator);
     }
 };
 
@@ -176,9 +173,9 @@ test "config file loads through config.load" {
     var cfg = try config.load(std.testing.allocator, std.testing.io, path);
     defer cfg.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), cfg.targets.len);
+    try std.testing.expectEqual(1, cfg.targets.len);
     try std.testing.expectEqualStrings("integration-test", cfg.targets[0].name);
-    try std.testing.expectEqual(@as(u32, 30), cfg.targets[0].periodSeconds);
+    try std.testing.expectEqual(30, cfg.targets[0].period_seconds);
     try std.testing.expectEqualStrings(".status", cfg.targets[0].metrics[0].labels[0].query);
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -44,10 +45,10 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	var cfg Config
 	if err := yaml.Unmarshal(raw, &cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	if len(cfg.Targets) == 0 {
-		return nil, fmt.Errorf("config has no targets")
+		return nil, errors.New("config has no targets")
 	}
 	for i := range cfg.Targets {
 		if err := cfg.Targets[i].normalize(); err != nil {
@@ -59,7 +60,7 @@ func LoadConfig(path string) (*Config, error) {
 
 func (t *Target) normalize() error {
 	if t.Name == "" {
-		return fmt.Errorf("target name is required")
+		return errors.New("target name is required")
 	}
 	if t.URI == "" {
 		return fmt.Errorf("target %s: uri is required", t.Name)
@@ -78,6 +79,7 @@ func (t *Target) normalize() error {
 	if t.UseBearerTokenFrom != "" && os.Getenv(t.UseBearerTokenFrom) == "" {
 		return fmt.Errorf("target %s: bearer token env var %s is not set", t.Name, t.UseBearerTokenFrom)
 	}
+	// nil means the metrics key is absent; an explicit empty list is valid (parity with rust/zig)
 	if t.Metrics == nil {
 		return fmt.Errorf("target %s: metrics is required", t.Name)
 	}

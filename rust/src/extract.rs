@@ -25,7 +25,10 @@ fn compile(query: &str) -> Result<Filter> {
                 path: (),
             },
         )
-        .map_err(|errs| anyhow!("failed to parse jq query '{query}': {errs:?}"))?;
+        .map_err(|errs| {
+            let errs: Vec<_> = errs.into_iter().map(|(_, e)| e).collect();
+            anyhow!("failed to parse jq query '{query}': {errs:?}")
+        })?;
     jaq_core::Compiler::default()
         .with_funs(
             jaq_core::funs()
@@ -33,7 +36,10 @@ fn compile(query: &str) -> Result<Filter> {
                 .chain(jaq_json::funs()),
         )
         .compile(modules)
-        .map_err(|errs| anyhow!("failed to compile jq query '{query}': {errs:?}"))
+        .map_err(|errs| {
+            let errs: Vec<_> = errs.into_iter().map(|(_, e)| e).collect();
+            anyhow!("failed to compile jq query '{query}': {errs:?}")
+        })
 }
 
 fn run(filter: &Filter, input: Val) -> impl Iterator<Item = Val> {
@@ -77,28 +83,28 @@ impl MetricExtractor {
     pub fn extract(&self, root: &Val) -> Vec<(Vec<String>, f64)> {
         let mut samples = Vec::new();
         for item in run(&self.items, root.clone()) {
-            let value = match first(&self.value, item.clone()) {
-                Some(Val::Bool(b)) => {
+            let Some(val) = first(&self.value, item.clone()) else {
+                warn!(
+                    "metric '{}': value query yielded no result, skipping",
+                    self.name
+                );
+                continue;
+            };
+            let value = match val {
+                Val::Bool(b) => {
                     if b {
                         1.0
                     } else {
                         0.0
                     }
                 }
-                Some(val) => match val.as_f64() {
+                val => match val.as_f64() {
                     Some(value) => value,
                     None => {
                         warn!("metric '{}': skipping non-numeric value {val}", self.name);
                         continue;
                     }
                 },
-                None => {
-                    warn!(
-                        "metric '{}': value query yielded no result, skipping",
-                        self.name
-                    );
-                    continue;
-                }
             };
             let labels = self
                 .labels

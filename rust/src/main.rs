@@ -4,14 +4,15 @@ mod poller;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use axum::{Router, extract::State, routing::get};
+use anyhow::{Context, Result, bail};
+use axum::{Router, extract::State, http::StatusCode, routing::get};
 use clap::Parser;
-use prometheus::{Encoder, Registry, TextEncoder};
+use prometheus::{Registry, TextEncoder};
 use reqwest::Client;
 use tokio::signal;
+use tokio::task::JoinSet;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -20,18 +21,21 @@ use tracing_subscriber::EnvFilter;
 #[command(about = "prometheus exporter for JSON HTTP APIs via jq queries")]
 struct Args {
     #[arg(short, long, default_value = "config.yaml")]
-    config: String,
+    config: PathBuf,
 
     #[arg(long, default_value = "0.0.0.0:9100")]
     listen: String,
 }
 
-async fn metrics_handler(State(registry): State<Arc<Registry>>) -> Result<String, String> {
-    let mut buffer = Vec::new();
+async fn metrics_handler(State(registry): State<Registry>) -> Result<String, (StatusCode, String)> {
     TextEncoder::new()
-        .encode(&registry.gather(), &mut buffer)
-        .map_err(|e| format!("Failed to encode metrics: {e}"))?;
-    String::from_utf8(buffer).map_err(|e| format!("Failed to convert metrics to UTF-8: {e}"))
+        .encode_to_string(&registry.gather())
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to encode metrics: {e}"),
+            )
+        })
 }
 
 #[tokio::main]
@@ -40,20 +44,26 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let config = config::load_config(&args.config)
-        .with_context(|| format!("Failed to load config from {}", args.config))?;
+        .with_context(|| format!("Failed to load config from {}", args.config.display()))?;
 
     info!("Loaded {} targets from config", config.targets.len());
 
-    let registry = Arc::new(Registry::new());
+    let registry = Registry::new();
     let client = Client::builder()
         .gzip(true)
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .context("Failed to create HTTP client")?;
 
-    spawn_pollers(config.targets, &registry, client)?;
+    let mut pollers = spawn_pollers(config.targets, &registry, &client)?;
 
-    serve_metrics(args.listen, registry).await
+    tokio::select! {
+        res = serve_metrics(args.listen, registry) => res,
+        Some(res) = pollers.join_next() => match res {
+            Ok(()) => bail!("poller task exited unexpectedly"),
+            Err(e) => Err(e).context("poller task failed"),
+        },
+    }
 }
 
 fn init_tracing() {
@@ -66,18 +76,18 @@ fn init_tracing() {
         .init();
 }
 
-fn spawn_pollers(targets: Vec<config::Target>, registry: &Registry, client: Client) -> Result<()> {
+fn spawn_pollers(
+    targets: Vec<config::Target>,
+    registry: &Registry,
+    client: &Client,
+) -> Result<JoinSet<()>> {
+    let mut pollers = JoinSet::new();
     for target in targets {
-        let name = target.name.clone();
-        let poller = poller::Poller::new(target, registry)
-            .with_context(|| format!("Failed to create poller for target '{name}'"))?;
+        let poller = poller::Poller::new(target, registry)?;
         let client = client.clone();
-
-        tokio::spawn(async move {
-            poller.run(client).await;
-        });
+        pollers.spawn(async move { poller.run(client).await });
     }
-    Ok(())
+    Ok(pollers)
 }
 
 async fn shutdown_signal() {
@@ -90,7 +100,7 @@ async fn shutdown_signal() {
     info!("Received shutdown signal");
 }
 
-async fn serve_metrics(listen: String, registry: Arc<Registry>) -> Result<()> {
+async fn serve_metrics(listen: String, registry: Registry) -> Result<()> {
     let app = Router::new()
         .route("/metrics", get(metrics_handler))
         .route("/health", get(|| async { "OK" }))

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,7 +15,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func createRootCmd() *cobra.Command {
+func newRootCmd() *cobra.Command {
 	var (
 		cfgPath    string
 		listenAddr string
@@ -23,7 +24,7 @@ func createRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "json2prom",
 		Short: "curl->json->jq->prometheus_metric",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			level := slog.LevelInfo
 			switch logLevel {
 			case "debug":
@@ -65,7 +66,7 @@ func createRootCmd() *cobra.Command {
 			}
 			go func() {
 				logger.Info("serving metrics", "addr", listenAddr)
-				if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					logger.Error("http server error", "error", err)
 					stop()
 				}
@@ -78,15 +79,15 @@ func createRootCmd() *cobra.Command {
 		},
 	}
 
-	cmd.PersistentFlags().StringVar(&cfgPath, "config", "config.yaml", "Path to YAML configuration file")
-	cmd.PersistentFlags().StringVar(&listenAddr, "listen", "0.0.0.0:9101", "HTTP listen address for Prometheus metrics endpoint")
-	cmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
+	cmd.Flags().StringVar(&cfgPath, "config", "config.yaml", "Path to YAML configuration file")
+	cmd.Flags().StringVar(&listenAddr, "listen", "0.0.0.0:9101", "HTTP listen address for Prometheus metrics endpoint")
+	cmd.Flags().StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
 
 	return cmd
 }
 
 func main() {
-	if err := createRootCmd().Execute(); err != nil {
+	if err := newRootCmd().Execute(); err != nil {
 		slog.Error(err.Error())
 		os.Exit(1)
 	}

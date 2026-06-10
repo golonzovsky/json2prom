@@ -41,9 +41,10 @@ func compileQuery(src string) (*gojq.Code, error) {
 
 func NewPoller(tgt Target, reg prometheus.Registerer, logger *slog.Logger) (*Poller, error) {
 	p := &Poller{
-		tgt:    tgt,
-		client: &http.Client{Timeout: 10 * time.Second},
-		logger: logger.With("target", tgt.Name),
+		tgt:     tgt,
+		client:  &http.Client{Timeout: 10 * time.Second},
+		metrics: make([]*metricBinding, 0, len(tgt.Metrics)),
+		logger:  logger.With("target", tgt.Name),
 	}
 	for _, m := range tgt.Metrics {
 		mb, err := prepareMetric(m, reg)
@@ -65,8 +66,9 @@ func prepareMetric(mc MetricConfig, reg prometheus.Registerer) (*metricBinding, 
 		return nil, fmt.Errorf("valueQuery: %w", err)
 	}
 
-	labelNames := []string{"target"}
-	var labelQueries []*gojq.Code
+	labelNames := make([]string, 0, len(mc.Labels)+1)
+	labelNames = append(labelNames, "target")
+	labelQueries := make([]*gojq.Code, 0, len(mc.Labels))
 	for _, l := range mc.Labels {
 		q, err := compileQuery(l.Query)
 		if err != nil {
@@ -122,6 +124,7 @@ func (p *Poller) scrapeOnce(ctx context.Context) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode/100 != 2 {
+		io.Copy(io.Discard, resp.Body)
 		p.logger.Warn("non-2xx status", "status", resp.StatusCode)
 		return
 	}
@@ -227,6 +230,7 @@ func labelValue(v any) string {
 	switch t := v.(type) {
 	case string:
 		return t
+	// label query runtime errors render as "" (parity: same as zero results)
 	case error:
 		return ""
 	default:

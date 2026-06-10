@@ -11,8 +11,8 @@ pub const LabelConfig = struct {
 
 pub const MetricConfig = struct {
     name: []const u8,
-    itemsQuery: []const u8 = ".",
-    valueQuery: []const u8,
+    items_query: []const u8 = ".",
+    value_query: []const u8,
     labels: []const LabelConfig = &.{},
 };
 
@@ -25,11 +25,11 @@ pub const TargetConfig = struct {
     name: []const u8,
     uri: []const u8,
     method: Method = .GET,
-    useBearerTokenFrom: ?[]const u8 = null,
-    bearerToken: ?[]const u8 = null,
+    use_bearer_token_from: ?[]const u8 = null,
+    bearer_token: ?[]const u8 = null,
     headers: []const Param = &.{},
-    formParams: []const Param = &.{},
-    periodSeconds: u32,
+    form_params: []const Param = &.{},
+    period_seconds: u32,
     metrics: []const MetricConfig,
 };
 
@@ -44,7 +44,7 @@ pub const Config = struct {
 
 pub const Error = error{InvalidConfig} || std.mem.Allocator.Error;
 
-pub fn load(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Config {
+pub fn load(allocator: std.mem.Allocator, io: std.Io, path: []const u8) Error!Config {
     const source = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch |err| {
         logError("cannot read config file {s}: {t}", .{ path, err });
         return error.InvalidConfig;
@@ -58,7 +58,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) Error!Config {
     errdefer arena.deinit();
     const aa = arena.allocator();
 
-    var doc = yaml.Yaml{ .source = source };
+    var doc: yaml.Yaml = .{ .source = source };
     defer doc.deinit(allocator);
     doc.load(allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -88,7 +88,7 @@ fn parseTarget(aa: std.mem.Allocator, node: yaml.Yaml.Value) Error!TargetConfig 
     var target: TargetConfig = .{
         .name = name,
         .uri = try requiredString(aa, map, "uri", name),
-        .periodSeconds = undefined,
+        .period_seconds = undefined,
         .metrics = undefined,
     };
 
@@ -96,15 +96,15 @@ fn parseTarget(aa: std.mem.Allocator, node: yaml.Yaml.Value) Error!TargetConfig 
         target.method = std.meta.stringToEnum(Method, m) orelse
             return fail("target {s}: invalid method '{s}' (want GET/POST/PUT/DELETE)", .{ name, m });
     }
-    target.useBearerTokenFrom = try optionalString(aa, map, "useBearerTokenFrom", name);
+    target.use_bearer_token_from = try optionalString(aa, map, "useBearerTokenFrom", name);
     target.headers = try parseParams(aa, map, "headers", name);
-    target.formParams = try parseParams(aa, map, "formParams", name);
+    target.form_params = try parseParams(aa, map, "formParams", name);
 
     const period_str = try requiredString(aa, map, "periodSeconds", name);
     const period = std.fmt.parseInt(i64, period_str, 10) catch
         return fail("target {s}: periodSeconds must be an integer, got '{s}'", .{ name, period_str });
     if (period <= 0) return fail("target {s}: periodSeconds must be > 0, got {d}", .{ name, period });
-    target.periodSeconds = std.math.cast(u32, period) orelse
+    target.period_seconds = std.math.cast(u32, period) orelse
         return fail("target {s}: periodSeconds too large", .{name});
 
     const metrics_node = map.get("metrics") orelse return fail("target {s}: missing 'metrics'", .{name});
@@ -124,9 +124,9 @@ fn parseMetric(aa: std.mem.Allocator, node: yaml.Yaml.Value, target_name: []cons
 
     var metric: MetricConfig = .{
         .name = name,
-        .valueQuery = try requiredString(aa, map, "valueQuery", name),
+        .value_query = try requiredString(aa, map, "valueQuery", name),
     };
-    if (try optionalString(aa, map, "itemsQuery", name)) |q| metric.itemsQuery = q;
+    if (try optionalString(aa, map, "itemsQuery", name)) |q| metric.items_query = q;
 
     if (map.get("labels")) |labels_node| {
         const labels_list = labels_node.asList() orelse return fail("metric {s}: 'labels' must be a list", .{name});
@@ -184,13 +184,13 @@ pub fn logError(comptime fmt: []const u8, args: anytype) void {
 /// `env` needs a `get([]const u8) ?[]const u8` method; pass `init.environ_map`.
 pub fn resolveBearerTokens(targets: []TargetConfig, env: anytype) error{MissingBearerToken}!void {
     for (targets) |*target| {
-        const env_name = target.useBearerTokenFrom orelse continue;
+        const env_name = target.use_bearer_token_from orelse continue;
         const token = env.get(env_name) orelse "";
         if (token.len == 0) {
             logError("config: target {s}: useBearerTokenFrom is set but environment variable {s} is missing or empty", .{ target.name, env_name });
             return error.MissingBearerToken;
         }
-        target.bearerToken = token;
+        target.bearer_token = token;
     }
 }
 
@@ -221,25 +221,25 @@ test "full config with all fields" {
     var cfg = try parse(std.testing.allocator, source);
     defer cfg.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), cfg.targets.len);
+    try std.testing.expectEqual(1, cfg.targets.len);
     const target = cfg.targets[0];
     try std.testing.expectEqualStrings("test-target", target.name);
     try std.testing.expectEqualStrings("https://example.com/api", target.uri);
     try std.testing.expectEqual(Method.POST, target.method);
-    try std.testing.expectEqualStrings("MY_TOKEN", target.useBearerTokenFrom.?);
-    try std.testing.expectEqual(@as(u32, 30), target.periodSeconds);
+    try std.testing.expectEqualStrings("MY_TOKEN", target.use_bearer_token_from.?);
+    try std.testing.expectEqual(30, target.period_seconds);
 
-    try std.testing.expectEqual(@as(usize, 2), target.headers.len);
+    try std.testing.expectEqual(2, target.headers.len);
     try std.testing.expectEqualStrings("X-Custom", target.headers[0].name);
     try std.testing.expectEqualStrings("abc", target.headers[0].value);
-    try std.testing.expectEqual(@as(usize, 1), target.formParams.len);
-    try std.testing.expectEqualStrings("grant_type", target.formParams[0].name);
+    try std.testing.expectEqual(1, target.form_params.len);
+    try std.testing.expectEqualStrings("grant_type", target.form_params[0].name);
 
     const metric = target.metrics[0];
     try std.testing.expectEqualStrings("test_metric", metric.name);
-    try std.testing.expectEqualStrings(".items[]", metric.itemsQuery);
-    try std.testing.expectEqualStrings(".value", metric.valueQuery);
-    try std.testing.expectEqual(@as(usize, 2), metric.labels.len);
+    try std.testing.expectEqualStrings(".items[]", metric.items_query);
+    try std.testing.expectEqualStrings(".value", metric.value_query);
+    try std.testing.expectEqual(2, metric.labels.len);
     try std.testing.expectEqualStrings("label1", metric.labels[0].name);
     try std.testing.expectEqualStrings(".label1", metric.labels[0].query);
 }
@@ -260,13 +260,13 @@ test "defaults for optional fields" {
 
     const target = cfg.targets[0];
     try std.testing.expectEqual(Method.GET, target.method);
-    try std.testing.expectEqual(@as(?[]const u8, null), target.useBearerTokenFrom);
-    try std.testing.expectEqual(@as(usize, 0), target.headers.len);
-    try std.testing.expectEqual(@as(usize, 0), target.formParams.len);
+    try std.testing.expectEqual(null, target.use_bearer_token_from);
+    try std.testing.expectEqual(0, target.headers.len);
+    try std.testing.expectEqual(0, target.form_params.len);
 
     const metric = target.metrics[0];
-    try std.testing.expectEqualStrings(".", metric.itemsQuery);
-    try std.testing.expectEqual(@as(usize, 0), metric.labels.len);
+    try std.testing.expectEqualStrings(".", metric.items_query);
+    try std.testing.expectEqual(0, metric.labels.len);
 }
 
 test "multiple targets" {
@@ -290,9 +290,9 @@ test "multiple targets" {
     var cfg = try parse(std.testing.allocator, source);
     defer cfg.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), cfg.targets.len);
+    try std.testing.expectEqual(2, cfg.targets.len);
     try std.testing.expectEqualStrings("target1", cfg.targets[0].name);
-    try std.testing.expectEqual(@as(u32, 60), cfg.targets[0].periodSeconds);
+    try std.testing.expectEqual(60, cfg.targets[0].period_seconds);
     try std.testing.expectEqualStrings("target2", cfg.targets[1].name);
     try std.testing.expectEqual(Method.POST, cfg.targets[1].method);
 }
@@ -387,15 +387,15 @@ test "bearer token resolution" {
     var targets = [_]TargetConfig{.{
         .name = "t",
         .uri = "https://example.com",
-        .useBearerTokenFrom = "MY_TOKEN",
-        .periodSeconds = 10,
+        .use_bearer_token_from = "MY_TOKEN",
+        .period_seconds = 10,
         .metrics = &.{},
     }};
 
     try resolveBearerTokens(&targets, FakeEnv{ .name = "MY_TOKEN", .value = "s3cret" });
-    try std.testing.expectEqualStrings("s3cret", targets[0].bearerToken.?);
+    try std.testing.expectEqualStrings("s3cret", targets[0].bearer_token.?);
 
-    targets[0].bearerToken = null;
+    targets[0].bearer_token = null;
     try std.testing.expectError(
         error.MissingBearerToken,
         resolveBearerTokens(&targets, FakeEnv{ .name = "OTHER", .value = "x" }),
@@ -410,9 +410,9 @@ test "no bearer config needs no env" {
     var targets = [_]TargetConfig{.{
         .name = "t",
         .uri = "https://example.com",
-        .periodSeconds = 10,
+        .period_seconds = 10,
         .metrics = &.{},
     }};
     try resolveBearerTokens(&targets, FakeEnv{ .name = "X", .value = "y" });
-    try std.testing.expectEqual(@as(?[]const u8, null), targets[0].bearerToken);
+    try std.testing.expectEqual(null, targets[0].bearer_token);
 }

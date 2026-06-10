@@ -3,10 +3,21 @@ use crate::extract::MetricExtractor;
 
 use anyhow::{Context, Result, bail, ensure};
 use prometheus::{GaugeVec, Opts, Registry};
-use reqwest::{Client, header};
+use reqwest::Client;
 use std::time::Duration;
 use tokio::time;
 use tracing::{debug, error, warn};
+
+impl From<Method> for reqwest::Method {
+    fn from(method: Method) -> Self {
+        match method {
+            Method::Get => Self::GET,
+            Method::Post => Self::POST,
+            Method::Put => Self::PUT,
+            Method::Delete => Self::DELETE,
+        }
+    }
+}
 
 struct BoundMetric {
     extractor: MetricExtractor,
@@ -20,6 +31,12 @@ pub struct Poller {
 
 impl Poller {
     pub fn new(target: Target, registry: &Registry) -> Result<Self> {
+        let metrics = Self::bind_metrics(&target, registry)
+            .with_context(|| format!("Failed to create poller for target '{}'", target.name))?;
+        Ok(Poller { target, metrics })
+    }
+
+    fn bind_metrics(target: &Target, registry: &Registry) -> Result<Vec<BoundMetric>> {
         if let Some(token_env) = &target.use_bearer_token_from
             && std::env::var(token_env).unwrap_or_default().is_empty()
         {
@@ -42,7 +59,7 @@ impl Poller {
 
             metrics.push(BoundMetric { extractor, gauge });
         }
-        Ok(Poller { target, metrics })
+        Ok(metrics)
     }
 
     pub async fn run(self, client: Client) {
@@ -58,18 +75,12 @@ impl Poller {
 
     async fn scrape(&self, client: &Client) -> Result<String> {
         debug!("sending request to {}", self.target.uri);
-        let method = match self.target.method {
-            Method::Get => reqwest::Method::GET,
-            Method::Post => reqwest::Method::POST,
-            Method::Put => reqwest::Method::PUT,
-            Method::Delete => reqwest::Method::DELETE,
-        };
-        let mut req = client.request(method, &self.target.uri);
+        let mut req = client.request(self.target.method.into(), &self.target.uri);
 
         if let Some(token_env) = &self.target.use_bearer_token_from {
             let token = std::env::var(token_env)
                 .with_context(|| format!("bearer token environment variable '{token_env}'"))?;
-            req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            req = req.bearer_auth(token);
         }
         for (k, v) in self.target.headers.iter().flatten() {
             req = req.header(k.as_str(), v.as_str());

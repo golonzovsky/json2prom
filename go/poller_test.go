@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -34,7 +36,7 @@ targets:
 		t.Fatal(err)
 	}
 	tgt := cfg.Targets[0]
-	if tgt.Method != "GET" {
+	if tgt.Method != http.MethodGet {
 		t.Errorf("default method = %q, want GET", tgt.Method)
 	}
 	if got := tgt.Metrics[0].ItemsQuery; got != "." {
@@ -43,15 +45,22 @@ targets:
 }
 
 func TestLoadConfigValidation(t *testing.T) {
-	for name, content := range map[string]string{
-		"zero period": `
+	for name, tc := range map[string]struct {
+		yaml    string
+		wantErr string
+	}{
+		"zero period": {
+			yaml: `
 targets:
   - name: t1
     uri: http://example.com
     periodSeconds: 0
     metrics: []
 `,
-		"bad method": `
+			wantErr: "periodSeconds must be > 0",
+		},
+		"bad method": {
+			yaml: `
 targets:
   - name: t1
     uri: http://example.com
@@ -59,7 +68,10 @@ targets:
     periodSeconds: 60
     metrics: []
 `,
-		"missing bearer env": `
+			wantErr: "unsupported method",
+		},
+		"missing bearer env": {
+			yaml: `
 targets:
   - name: t1
     uri: http://example.com
@@ -67,28 +79,43 @@ targets:
     periodSeconds: 60
     metrics: []
 `,
-		"no targets": `
+			wantErr: "bearer token env var JSON2PROM_TEST_MISSING_TOKEN is not set",
+		},
+		"no targets": {
+			yaml: `
 targets: []
 `,
-		"missing name": `
+			wantErr: "config has no targets",
+		},
+		"missing name": {
+			yaml: `
 targets:
   - uri: http://example.com
     periodSeconds: 60
     metrics: []
 `,
-		"missing uri": `
+			wantErr: "target name is required",
+		},
+		"missing uri": {
+			yaml: `
 targets:
   - name: t1
     periodSeconds: 60
     metrics: []
 `,
-		"missing metrics": `
+			wantErr: "uri is required",
+		},
+		"missing metrics": {
+			yaml: `
 targets:
   - name: t1
     uri: http://example.com
     periodSeconds: 60
 `,
-		"missing metric name": `
+			wantErr: "metrics is required",
+		},
+		"missing metric name": {
+			yaml: `
 targets:
   - name: t1
     uri: http://example.com
@@ -96,7 +123,10 @@ targets:
     metrics:
       - valueQuery: .val
 `,
-		"missing valueQuery": `
+			wantErr: "metric name is required",
+		},
+		"missing valueQuery": {
+			yaml: `
 targets:
   - name: t1
     uri: http://example.com
@@ -104,10 +134,13 @@ targets:
     metrics:
       - name: m1
 `,
+			wantErr: "valueQuery is required",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := LoadConfig(writeConfig(t, content)); err == nil {
-				t.Error("expected error, got nil")
+			_, err := LoadConfig(writeConfig(t, tc.yaml))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v, want containing %q", err, tc.wantErr)
 			}
 		})
 	}

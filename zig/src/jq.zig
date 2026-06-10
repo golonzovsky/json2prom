@@ -1,8 +1,10 @@
 const std = @import("std");
 
-pub const c = @cImport({
+const c = @cImport({
     @cInclude("jq.h");
 });
+
+pub const Value = c.jv;
 
 pub const Error = error{
     CompileError,
@@ -13,13 +15,13 @@ pub const Error = error{
 pub const Query = struct {
     state: *c.jq_state,
 
-    pub fn compile(program: []const u8) Error!Query {
+    pub fn compile(allocator: std.mem.Allocator, program: []const u8) Error!Query {
         const state = c.jq_init() orelse return error.OutOfMemory;
         var owned: ?*c.jq_state = state;
         errdefer c.jq_teardown(&owned);
 
-        const programz = std.heap.c_allocator.dupeZ(u8, program) catch return error.OutOfMemory;
-        defer std.heap.c_allocator.free(programz);
+        const programz = try allocator.dupeZ(u8, program);
+        defer allocator.free(programz);
 
         if (c.jq_compile(state, programz) == 0) return error.CompileError;
         return .{ .state = state };
@@ -33,8 +35,8 @@ pub const Query = struct {
 
     /// Returns every value the program emits for `input`. The caller keeps
     /// ownership of `input` and owns each returned jv plus the slice.
-    pub fn exec(self: *Query, allocator: std.mem.Allocator, input: c.jv) ![]c.jv {
-        var results: std.ArrayList(c.jv) = .empty;
+    pub fn exec(self: *Query, allocator: std.mem.Allocator, input: Value) ![]Value {
+        var results: std.ArrayList(Value) = .empty;
         errdefer {
             for (results.items) |v| c.jv_free(v);
             results.deinit(allocator);
@@ -53,12 +55,16 @@ pub const Query = struct {
     }
 };
 
-pub fn freeResults(allocator: std.mem.Allocator, results: []c.jv) void {
+pub fn free(v: Value) void {
+    c.jv_free(v);
+}
+
+pub fn freeResults(allocator: std.mem.Allocator, results: []Value) void {
     for (results) |v| c.jv_free(v);
     allocator.free(results);
 }
 
-pub fn parseJson(input: []const u8) Error!c.jv {
+pub fn parseJson(input: []const u8) Error!Value {
     const v = c.jv_parse_sized(input.ptr, @intCast(input.len));
     if (c.jv_is_valid(v) == 0) {
         c.jv_free(v);
@@ -68,7 +74,7 @@ pub fn parseJson(input: []const u8) Error!c.jv {
 }
 
 /// Numbers as-is, booleans as 1/0, anything else null (caller skips the item).
-pub fn toNumber(v: c.jv) ?f64 {
+pub fn toNumber(v: Value) ?f64 {
     return switch (c.jv_get_kind(v)) {
         c.JV_KIND_NUMBER => c.jv_number_value(v),
         c.JV_KIND_TRUE => 1,
@@ -78,7 +84,7 @@ pub fn toNumber(v: c.jv) ?f64 {
 }
 
 /// Strings raw (no quotes), other kinds as their JSON text. Caller owns result.
-pub fn toLabelString(allocator: std.mem.Allocator, v: c.jv) ![]u8 {
+pub fn toLabelString(allocator: std.mem.Allocator, v: Value) ![]u8 {
     if (c.jv_get_kind(v) == c.JV_KIND_STRING) {
         const len: usize = @intCast(c.jv_string_length_bytes(c.jv_copy(v)));
         return allocator.dupe(u8, c.jv_string_value(v)[0..len]);
@@ -88,16 +94,16 @@ pub fn toLabelString(allocator: std.mem.Allocator, v: c.jv) ![]u8 {
     return allocator.dupe(u8, std.mem.span(c.jv_string_value(dumped)));
 }
 
-pub fn kindName(v: c.jv) []const u8 {
+pub fn kindName(v: Value) []const u8 {
     return std.mem.span(c.jv_kind_name(c.jv_get_kind(v)));
 }
 
 test "compile error fails fast" {
-    try std.testing.expectError(error.CompileError, Query.compile(".["));
+    try std.testing.expectError(error.CompileError, Query.compile(std.testing.allocator, ".["));
 }
 
 test "single result" {
-    var q = try Query.compile(".value");
+    var q = try Query.compile(std.testing.allocator, ".value");
     defer q.deinit();
 
     const root = try parseJson(
@@ -108,12 +114,12 @@ test "single result" {
     const results = try q.exec(std.testing.allocator, root);
     defer freeResults(std.testing.allocator, results);
 
-    try std.testing.expectEqual(@as(usize, 1), results.len);
-    try std.testing.expectEqual(@as(f64, 42), toNumber(results[0]).?);
+    try std.testing.expectEqual(1, results.len);
+    try std.testing.expectEqual(42, toNumber(results[0]).?);
 }
 
 test "multiple results from stream" {
-    var q = try Query.compile(".payload[]");
+    var q = try Query.compile(std.testing.allocator, ".payload[]");
     defer q.deinit();
 
     const root = try parseJson(
@@ -124,9 +130,9 @@ test "multiple results from stream" {
     const results = try q.exec(std.testing.allocator, root);
     defer freeResults(std.testing.allocator, results);
 
-    try std.testing.expectEqual(@as(usize, 3), results.len);
+    try std.testing.expectEqual(3, results.len);
     for (results, 1..) |item, i| {
-        var vq = try Query.compile(".val");
+        var vq = try Query.compile(std.testing.allocator, ".val");
         defer vq.deinit();
         const vals = try vq.exec(std.testing.allocator, item);
         defer freeResults(std.testing.allocator, vals);
@@ -135,7 +141,7 @@ test "multiple results from stream" {
 }
 
 test "no result" {
-    var q = try Query.compile(".[] | select(.x > 100)");
+    var q = try Query.compile(std.testing.allocator, ".[] | select(.x > 100)");
     defer q.deinit();
 
     const root = try parseJson("[{\"x\": 1}]");
@@ -143,7 +149,7 @@ test "no result" {
 
     const results = try q.exec(std.testing.allocator, root);
     defer freeResults(std.testing.allocator, results);
-    try std.testing.expectEqual(@as(usize, 0), results.len);
+    try std.testing.expectEqual(0, results.len);
 }
 
 test "value conversion rules" {
@@ -186,7 +192,7 @@ test "invalid JSON" {
 }
 
 test "query is reusable across inputs" {
-    var q = try Query.compile(".n");
+    var q = try Query.compile(std.testing.allocator, ".n");
     defer q.deinit();
 
     for ([_][]const u8{ "{\"n\": 1}", "{\"n\": 2}" }, 1..) |json, i| {

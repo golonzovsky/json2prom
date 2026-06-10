@@ -13,13 +13,13 @@ pub const CompiledMetric = struct {
     gauge: *metrics.Gauge,
 
     pub fn compile(allocator: std.mem.Allocator, registry: *metrics.Registry, mc: config.MetricConfig) !CompiledMetric {
-        var items_query = jq.Query.compile(mc.itemsQuery) catch |err| {
-            config.logError("metric {s}: invalid itemsQuery '{s}'", .{ mc.name, mc.itemsQuery });
+        var items_query = jq.Query.compile(allocator, mc.items_query) catch |err| {
+            config.logError("metric {s}: invalid itemsQuery '{s}'", .{ mc.name, mc.items_query });
             return err;
         };
         errdefer items_query.deinit();
-        var value_query = jq.Query.compile(mc.valueQuery) catch |err| {
-            config.logError("metric {s}: invalid valueQuery '{s}'", .{ mc.name, mc.valueQuery });
+        var value_query = jq.Query.compile(allocator, mc.value_query) catch |err| {
+            config.logError("metric {s}: invalid valueQuery '{s}'", .{ mc.name, mc.value_query });
             return err;
         };
         errdefer value_query.deinit();
@@ -34,7 +34,7 @@ pub const CompiledMetric = struct {
         label_names[0] = "target";
         for (mc.labels, label_names[1..]) |label, *label_name| {
             label_name.* = label.name;
-            const q = jq.Query.compile(label.query) catch |err| {
+            const q = jq.Query.compile(allocator, label.query) catch |err| {
                 config.logError("metric {s}: invalid label query '{s}'", .{ mc.name, label.query });
                 return err;
             };
@@ -59,41 +59,35 @@ pub const CompiledMetric = struct {
     }
 };
 
-pub fn evaluateMetric(allocator: std.mem.Allocator, target_name: []const u8, cm: *CompiledMetric, root: jq.c.jv) !void {
+pub fn evaluateMetric(gpa: std.mem.Allocator, target_name: []const u8, cm: *CompiledMetric, root: jq.Value) !void {
     cm.gauge.reset();
 
-    const items = try cm.items_query.exec(allocator, root);
-    defer jq.freeResults(allocator, items);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const items = try cm.items_query.exec(arena, root);
+    defer jq.freeResults(arena, items);
 
     for (items) |item| {
-        const values = try cm.value_query.exec(allocator, item);
-        defer jq.freeResults(allocator, values);
+        const values = try cm.value_query.exec(arena, item);
+        defer jq.freeResults(arena, values);
         if (values.len == 0) {
             std.log.warn("[{s}] metric {s}: valueQuery returned no result, skipping item", .{ target_name, cm.name });
             continue;
         }
         const value = jq.toNumber(values[0]) orelse {
-            const text = try jq.toLabelString(allocator, values[0]);
-            defer allocator.free(text);
+            const text = try jq.toLabelString(arena, values[0]);
             std.log.warn("[{s}] metric {s}: value is not a number or boolean ({s}: {s}), skipping item", .{ target_name, cm.name, jq.kindName(values[0]), text });
             continue;
         };
 
-        const label_values = try allocator.alloc([]const u8, cm.label_queries.len + 1);
-        var owned: usize = 1;
-        defer {
-            for (label_values[1..owned]) |v| allocator.free(v);
-            allocator.free(label_values);
-        }
+        const label_values = try arena.alloc([]const u8, cm.label_queries.len + 1);
         label_values[0] = target_name;
         for (cm.label_queries, label_values[1..]) |*query, *out| {
-            const results = try query.exec(allocator, item);
-            defer jq.freeResults(allocator, results);
-            out.* = if (results.len > 0)
-                try jq.toLabelString(allocator, results[0])
-            else
-                try allocator.dupe(u8, "");
-            owned += 1;
+            const results = try query.exec(arena, item);
+            defer jq.freeResults(arena, results);
+            out.* = if (results.len > 0) try jq.toLabelString(arena, results[0]) else "";
         }
 
         try cm.gauge.set(label_values, value);
@@ -147,14 +141,14 @@ pub const Poller = struct {
             out.* = .{ .name = header.name, .value = header.value };
         }
 
-        const auth_header = if (target.bearerToken) |token|
+        const auth_header = if (target.bearer_token) |token|
             try std.fmt.allocPrint(allocator, "Bearer {s}", .{token})
         else
             null;
         errdefer if (auth_header) |h| allocator.free(h);
 
-        const form_body = if (target.formParams.len > 0)
-            try urlEncode(allocator, target.formParams)
+        const form_body = if (target.form_params.len > 0)
+            try urlEncode(allocator, target.form_params)
         else
             null;
         errdefer if (form_body) |b| allocator.free(b);
@@ -198,10 +192,10 @@ pub const Poller = struct {
         while (self.running.load(.acquire)) {
             self.scrape();
 
-            var remaining_ms: u64 = @as(u64, self.target.periodSeconds) * 1000;
+            var remaining_ms: i64 = @as(i64, self.target.period_seconds) * 1000;
             while (remaining_ms > 0 and self.running.load(.acquire)) {
                 const chunk = @min(remaining_ms, 250);
-                self.io.sleep(.fromMilliseconds(@intCast(chunk)), .awake) catch {};
+                self.io.sleep(.fromMilliseconds(chunk), .awake) catch {};
                 remaining_ms -= chunk;
             }
         }
@@ -227,7 +221,7 @@ pub const Poller = struct {
             std.log.err("[{s}] response is not valid JSON, skipping cycle", .{self.target.name});
             return;
         };
-        defer jq.c.jv_free(root);
+        defer jq.free(root);
 
         for (self.compiled) |*cm| {
             try evaluateMetric(self.allocator, self.target.name, cm, root);
@@ -277,7 +271,7 @@ const TestContext = struct {
 
     fn init(mc: config.MetricConfig) !TestContext {
         var ctx: TestContext = .{
-            .registry = metrics.Registry.init(std.testing.allocator, std.testing.io),
+            .registry = .init(std.testing.allocator, std.testing.io),
             .compiled = undefined,
         };
         errdefer ctx.registry.deinit();
@@ -287,15 +281,12 @@ const TestContext = struct {
 
     fn evaluate(self: *TestContext, json: []const u8) !void {
         const root = try jq.parseJson(json);
-        defer jq.c.jv_free(root);
+        defer jq.free(root);
         try evaluateMetric(std.testing.allocator, "test-target", &self.compiled, root);
     }
 
     fn render(self: *TestContext) ![]u8 {
-        var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
-        defer aw.deinit();
-        try self.registry.render(&aw.writer);
-        return aw.toOwnedSlice();
+        return self.registry.renderAlloc(std.testing.allocator);
     }
 
     fn deinit(self: *TestContext) void {
@@ -307,7 +298,7 @@ const TestContext = struct {
 test "single item with labels, target label first" {
     var ctx = try TestContext.init(.{
         .name = "evo_percentage",
-        .valueQuery = ".percentageUsed",
+        .value_query = ".percentageUsed",
         .labels = &.{
             .{ .name = "name", .query = ".name" },
             .{ .name = "max_capacity", .query = ".max_capacity" },
@@ -329,8 +320,8 @@ test "single item with labels, target label first" {
 test "itemsQuery iterates multiple results" {
     var ctx = try TestContext.init(.{
         .name = "river_temp",
-        .itemsQuery = ".payload[]",
-        .valueQuery = ".val",
+        .items_query = ".payload[]",
+        .value_query = ".val",
         .labels = &.{.{ .name = "station", .query = ".loc" }},
     });
     defer ctx.deinit();
@@ -352,8 +343,8 @@ test "itemsQuery iterates multiple results" {
 test "non-numeric values skip the item, booleans convert" {
     var ctx = try TestContext.init(.{
         .name = "m",
-        .itemsQuery = ".[]",
-        .valueQuery = ".v",
+        .items_query = ".[]",
+        .value_query = ".v",
         .labels = &.{.{ .name = "id", .query = ".id" }},
     });
     defer ctx.deinit();
@@ -382,7 +373,7 @@ test "non-numeric values skip the item, booleans convert" {
 test "missing label result becomes empty string" {
     var ctx = try TestContext.init(.{
         .name = "m",
-        .valueQuery = ".v",
+        .value_query = ".v",
         .labels = &.{.{ .name = "gone", .query = ".does | select(. != null)" }},
     });
     defer ctx.deinit();
@@ -397,8 +388,8 @@ test "missing label result becomes empty string" {
 test "re-scrape replaces previous series" {
     var ctx = try TestContext.init(.{
         .name = "m",
-        .itemsQuery = ".[]",
-        .valueQuery = ".v",
+        .items_query = ".[]",
+        .value_query = ".v",
         .labels = &.{.{ .name = "id", .query = ".id" }},
     });
     defer ctx.deinit();
@@ -414,13 +405,13 @@ test "re-scrape replaces previous series" {
     defer std.testing.allocator.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "id=\"a\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "m{target=\"test-target\",id=\"b\"} 3") != null);
-    try std.testing.expectEqual(@as(usize, 1), ctx.compiled.gauge.series.items.len);
+    try std.testing.expectEqual(1, ctx.compiled.gauge.series.items.len);
 }
 
 test "default itemsQuery uses root" {
     var ctx = try TestContext.init(.{
         .name = "m",
-        .valueQuery = ".count",
+        .value_query = ".count",
     });
     defer ctx.deinit();
 
@@ -432,11 +423,11 @@ test "default itemsQuery uses root" {
 }
 
 test "compile fails fast on bad query" {
-    var registry = metrics.Registry.init(std.testing.allocator, std.testing.io);
+    var registry: metrics.Registry = .init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
     try std.testing.expectError(error.CompileError, CompiledMetric.compile(std.testing.allocator, &registry, .{
         .name = "m",
-        .valueQuery = ".[",
+        .value_query = ".[",
     }));
 }
 

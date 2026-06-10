@@ -9,7 +9,7 @@ pub struct Config {
     pub targets: Vec<Target>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Target {
     pub name: String,
@@ -36,7 +36,7 @@ pub enum Method {
     Delete,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetricDef {
     pub name: String,
@@ -52,7 +52,7 @@ impl MetricDef {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LabelQuery {
     pub name: String,
